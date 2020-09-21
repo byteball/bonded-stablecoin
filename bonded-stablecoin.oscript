@@ -1,0 +1,544 @@
+{
+	doc_url: "https://ostable.org/bonded-stablecoin.json",
+	getters: `{
+		$get_reserve = ($s1, $s2) => {
+			$dilution_factor = var['dilution_factor'];
+			$r = $dilution_factor * $s1^params.m * $s2^params.n;
+			$r
+		};
+
+		$get_p2 = ($s1, $s2) => {
+		//	$p2 = ($get_reserve($s1, $s2 + 0.001*$s2) - $get_reserve($s1, $s2))/(0.001*$s2); // derivative
+			$dilution_factor = var['dilution_factor'];
+			$p2 = $dilution_factor * $s1^params.m * params.n * (is_integer(params.n*2) ? sqrt($s2^((params.n-1)*2)) : $s2^(params.n-1) ); // derivative
+			$p2
+		};
+
+		$get_oracles = () => {
+			$oracles = var['oracles'];
+			if ($oracles)
+				return $oracles;
+			$initial_oracles = [];
+			if (params.oracle1 AND params.feed_name1)
+				$initial_oracles[] = {oracle: params.oracle1, feed_name: params.feed_name1, op: params.op1 OTHERWISE '*'};
+			if (params.oracle2 AND params.feed_name2)
+				$initial_oracles[] = {oracle: params.oracle2, feed_name: params.feed_name2, op: params.op2 OTHERWISE '*'};
+			if (params.oracle3 AND params.feed_name3)
+				$initial_oracles[] = {oracle: params.oracle3, feed_name: params.feed_name3, op: params.op3 OTHERWISE '*'};
+			$initial_oracles
+		};
+
+		// leverage
+		// 0: track the oracle price, e.g. USD
+		// 1: track the reserve price, e.g. GBYTE
+		// 2: take 2x long position in the reserve asset relative to the oracle price
+		// -1: take short position in the reserve asset relative to the oracle price
+		// -2: take 2x short position in the reserve asset relative to the oracle price
+		// fractional leverage is also ok
+		$get_leverage = () => params.leverage OTHERWISE 0;
+
+		$get_fee_multiplier = () => var['fee_multiplier'] OTHERWISE params.fee_multiplier OTHERWISE 5;
+
+		$get_initial_interest_rate = () => exists(params.interest_rate) ? params.interest_rate : 0.1; // 10%
+
+		$get_interest_rate = () => {
+			$interest_rate_var = var['interest_rate'];
+			exists($interest_rate_var) ? $interest_rate_var : $get_initial_interest_rate()
+		};
+
+		$get_slow_capacity_share = () => {
+			$slow_capacity_share_var = var['slow_capacity_share'];
+			if (exists($slow_capacity_share_var))
+				$slow_capacity_share = $slow_capacity_share_var;
+			else if (exists(params.slow_capacity_share))
+				$slow_capacity_share = params.slow_capacity_share;
+			else
+				$slow_capacity_share = 0.5;
+			$slow_capacity_share
+		};
+
+		$get_growth_factor = () => {
+			$interest_rate = $get_interest_rate();
+			$term = (timestamp - var['rate_update_ts']) / (360 * 24 * 3600); // in years
+			$growth_factor = var['growth_factor'] * (1 + $interest_rate)^$term;
+			$growth_factor
+		};
+
+		$get_fee = ($avg_reserve, $old_distance, $new_distance) => {
+			$fee_multiplier = $get_fee_multiplier();
+			// capacity = fee_multiplier * reserve * distance^2
+			$fee = ceil($fee_multiplier * $avg_reserve * ($new_distance - $old_distance) * ($new_distance + $old_distance));
+		//	$fee = ceil($fee_multiplier * $avg_reserve * ($new_distance - $old_distance));
+		//	$fee = ceil($abs_reserve_delta * ($new_distance + $old_distance) / 2 * $fee_multiplier);
+			$fee
+		};
+
+		$get_oracle_price = () => {
+			$oracles = $get_oracles();
+			$oracle_price = reduce($oracles, 3, ($price, $oracle_info) => {
+				if (!exists($price))
+					return false;
+				$df = data_feed[[oracles=$oracle_info.oracle, feed_name=$oracle_info.feed_name, ifnone=false]];
+				if (!exists($df))
+					return false;
+				($oracle_info.op == '*') ? $price * $df : $price / $df
+			}, 1);
+			$oracle_price
+		};
+
+		$get_target_p2 = () => {
+			$oracle_price = $get_oracle_price();
+			if (!exists($oracle_price))
+				return false;
+			$target_p2 = $oracle_price^($get_leverage() - 1) * $get_growth_factor();
+			$target_p2
+		};
+
+		$get_turnover = ($reserve_payout, $tokens1, $tokens2, $p2) => {
+			// positive numbers are outputs, negative amounts are inputs
+			$reserve_turnover = abs($reserve_payout);
+			if ($tokens1 >= 0 AND $tokens2 >= 0 OR $tokens1 <= 0 AND $tokens2 <= 0)
+				return $reserve_turnover;
+			$token2_turnover = abs($tokens2) * $p2 * 10^(params.reserve_asset_decimals - params.decimals2);
+			if ($tokens2 >= 0 AND $reserve_payout >= 0 OR $tokens2 <= 0 AND $reserve_payout <= 0)
+				return $token2_turnover + $reserve_turnover;
+			$token2_turnover
+		};
+
+		$get_exchange_result = ($tokens1, $tokens2) => {
+			$slow_capacity_share = $get_slow_capacity_share();
+			$fast_capacity_share = 1 - $slow_capacity_share;
+
+			$initial_p2 = var['p2'];
+			$target_p2 = $get_target_p2();
+			$distance = (exists($initial_p2) AND exists($target_p2)) ? abs($initial_p2 - $target_p2) / $target_p2 : 0;
+
+			$reserve = var['reserve'];
+			if (!$reserve AND ($tokens1 <= 0 OR $tokens2 <= 0))
+				bounce("initial mint must be with both tokens");
+			$new_supply1 = var['supply1'] + $tokens1;
+			$new_supply2 = var['supply2'] + $tokens2;
+			$s1 = $new_supply1 / 10^params.decimals1;
+			$s2 = $new_supply2 / 10^params.decimals2;
+			$r = $get_reserve($s1, $s2);
+			$p2 = $get_p2($s1, $s2);
+			$new_reserve = ceil($r * 10^params.reserve_asset_decimals);
+			$reserve_delta = $new_reserve - $reserve; // can be negative
+			if ($tokens1 >= 0 AND $tokens2 >= 0 AND $reserve_delta < 0)
+				bounce("issuing tokens while the reserve decreases?");
+			if ($tokens1 <= 0 AND $tokens2 <= 0 AND $reserve_delta > 0)
+				bounce("burning tokens while the reserve increases?");
+
+			$new_distance = exists($target_p2) ? abs($p2 - $target_p2) / $target_p2 : 0;
+			$avg_reserve = ($reserve + $new_reserve) / 2;
+			$fast_capacity = var['fast_capacity'];
+			if ($distance == 0 AND $new_distance == 0){
+				$fee = 0;
+				$reward = 0;
+				$reserve_needed = $reserve_delta;
+			}
+			else if ($new_distance >= $distance){ // going away from the target price - pay a fee
+				$reward = 0;
+				$regular_fee = $get_fee($avg_reserve, $distance, $new_distance);
+				$new_fast_capacity = $fast_capacity + $regular_fee * $fast_capacity_share;
+				$distance_share = 1 - $distance/$new_distance;
+				// reward that would be paid for returning the price back to $initial_p2
+				$reverse_reward = $distance_share * $new_fast_capacity;
+				if ($regular_fee >= $reverse_reward)
+					$fee = $regular_fee;
+				else
+					$fee = ceil($distance_share / (1 - $distance_share * $fast_capacity_share) * $fast_capacity);
+				$reserve_needed = $reserve_delta + $fee; // negative for payouts
+			}
+			else { // going towards the target price - get a reward
+				$fee = 0;
+				$reward = floor((1 - $new_distance/$distance) * $fast_capacity);
+				$reserve_needed = $reserve_delta - $reward; // negative for payouts
+			}
+			$turnover = $get_turnover(-$reserve_delta, $tokens1, $tokens2, $p2);
+			$fee_percent = $fee/$turnover*100;
+
+			{
+				reserve_needed: $reserve_needed,
+				reserve_delta: $reserve_delta,
+				fee: $fee,
+				regular_fee: $regular_fee,
+				reward: $reward,
+				initial_p2: $initial_p2,
+				p2: $p2,
+				target_p2: $target_p2,
+				new_distance: $new_distance,
+				turnover: $turnover,
+				fee_percent: $fee_percent,
+				slow_capacity_share: $slow_capacity_share,
+			}
+		};
+	}`,
+	init: `{
+		$define_asset2_forwarder = 'FNSRIUI7TPKK23PTR6MIXCPFIUSOKP2K';
+		$governance_base_aa = 'Y4VBXMROK5BWBKSYYAMUW7QUEZFXYBCF';
+
+		$aa2aa_bytes = 2000;
+		
+		// peg
+		$allow_oracle_change = params.allow_oracle_change;
+
+		// curve
+		if (!exists(params.m) OR !exists(params.n))
+			bounce("curve not defined");
+
+		// dilution
+		$allow_grants = params.allow_grants;
+
+		// fee and capacitor
+		$moved_capacity_share = var['moved_capacity_share'] OTHERWISE params.moved_capacity_share OTHERWISE 0.1; // how much is moved each time
+		$threshold_distance = var['threshold_distance'] OTHERWISE params.threshold_distance OTHERWISE 0.01; // 1% deviation from the peg
+		$move_capacity_timeout = var['move_capacity_timeout'] OTHERWISE params.move_capacity_timeout OTHERWISE 2*3600;
+
+		// reserve
+		$reserve_asset = params.reserve_asset OTHERWISE 'base';
+		if (!exists(params.reserve_asset_decimals))
+			bounce('no reserve_asset_decimals');
+		$min_contribution = ($reserve_asset == 'base') ? 99999 : 0;
+		$network_fee = ($reserve_asset == 'base') ? 1000 : 0;
+
+		// tokens
+		if (!exists(params.decimals1))
+			bounce('no decimals1');
+		if (!exists(params.decimals2))
+			bounce('no decimals2');
+		$asset1 = var['asset1'];
+		$asset2 = var['asset2'];
+
+		$ready = $asset1 AND $asset2;
+		if ($ready)
+			$lost_peg_ts = var['lost_peg_ts'];
+	}`,
+	messages: {
+		cases: [
+
+			// 0. define the token assets
+			{
+				if: `{ trigger.data.define AND (!$asset1 OR !$asset2) }`,
+				init: `{
+					$index = !$asset1 ? 1 : 2;
+				}`,
+				messages: [
+					{
+						app: 'asset',
+						payload: {
+							// without cap
+							is_private: false,
+							is_transferrable: true,
+							auto_destroy: false,
+							fixed_denominations: false,
+							issued_by_definer_only: true,
+							cosigned_by_definer: false,
+							spender_attested: false,
+						}
+					},
+					{ // define the second asset through a forwarder
+						if: `{trigger.data.factory AND !$asset1}`,
+						app: 'data',
+						payload: {
+							factory: "{trigger.data.factory}",
+						}
+					},
+					{
+						if: `{trigger.data.factory AND !$asset1}`,
+						app: 'payment',
+						payload: {
+							asset: 'base',
+							outputs: [
+								{address: "{$define_asset2_forwarder}", amount: 4000}
+							]
+						}
+					},
+					{ // call back to factory to record our newly defined assets
+						if: `{trigger.data.factory AND $asset1}`,
+						app: 'data',
+						payload: {
+							asset1: "{$asset1}",
+						}
+					},
+					{
+						if: `{trigger.data.factory AND $asset1}`,
+						app: 'payment',
+						payload: {
+							asset: 'base',
+							outputs: [
+								{address: '{trigger.data.factory}', amount: 4000},
+							]
+						}
+					},
+					{ // define governance AA
+						if: `{$asset1}`,
+						app: 'definition',
+						payload: {
+							definition: [
+								'autonomous agent',
+								{
+									base_aa: `{$governance_base_aa}`,
+									params: {
+										curve_aa: `{this_address}`,
+										regular_challenging_period: `{params.regular_challenging_period}`,
+										important_challenging_period: `{params.important_challenging_period}`,
+										freeze_period: `{params.freeze_period}`,
+										proposal_min_support: `{params.proposal_min_support}`,
+									}
+								}
+							]
+						}
+					},
+					{
+						app: 'state',
+						state: `{
+							var['asset' || $index] = response_unit;
+							response['asset' || $index] = response_unit;
+							if ($asset1){
+								var['governance_aa'] = unit[response_unit].messages[[.app='definition']].payload.address;
+								var['rate_update_ts'] = timestamp;
+								var['growth_factor'] = 1;
+								var['interest_rate'] = $get_initial_interest_rate();
+								var['dilution_factor'] = 1;
+							}
+						}`
+					}
+				]
+			},
+
+			{ // move the capacity from slow to fast pool
+				if: `{ $ready AND trigger.data.move_capacity }`,
+				messages: [
+					{
+						app: 'state',
+						state: `{
+							if ($lost_peg_ts){
+								$initial_p2 = var['p2'];
+								$target_p2 = $get_target_p2();
+								$distance = exists($initial_p2) ? abs($initial_p2 - $target_p2) / $target_p2 : 0;
+								if ($distance > $threshold_distance AND timestamp > $lost_peg_ts + $move_capacity_timeout){
+									$amount = floor($moved_capacity_share * var['slow_capacity']);
+									var['slow_capacity'] -= $amount;
+									var['fast_capacity'] += $amount;
+									var['lost_peg_ts'] = timestamp; // restart the countdown to the next movement
+									response['amount'] = $amount;
+								}
+								else if ($distance <= $threshold_distance)
+									var['lost_peg_ts'] = false;
+							}
+							else if ($distance > $threshold_distance)
+								var['lost_peg_ts'] = timestamp;
+						}`
+					}
+				]
+			},
+
+			{ // accept variable changes from the governance AA
+				if: `{ $ready AND trigger.address == var['governance_aa'] AND trigger.data.name }`, // trigger.data.value can be falsy
+				init: `{
+					$name = trigger.data.name;
+				}`,
+				messages: [
+					{
+						app: 'state',
+						state: `{
+							if ($name == 'oracles' AND !$allow_oracle_change)
+								bounce("changing the oracle is not allowed");
+							if ($name == 'interest_rate'){
+								var['growth_factor'] = $get_growth_factor();
+								var['rate_update_ts'] = timestamp;
+							}
+							if (starts_with($name, 'deposits.')){
+								$short_name = substring($name, length('deposits.'));
+								$deposit_params = var['deposit_params'] OTHERWISE {};
+								$deposit_params[$short_name] = trigger.data.value;
+								var['deposit_params'] = $deposit_params;
+							}
+							else
+								var[$name] = trigger.data.value;
+						}`
+					}
+				]
+			},
+
+			{ // accept a passed proposal from the governance AA
+				if: `{ $ready AND trigger.address == var['governance_aa'] AND $allow_grants AND trigger.data.grant AND trigger.data.recipient AND trigger.data.amount }`,
+				init: `{
+					$name = trigger.data.name;
+				}`,
+				messages: [
+					{
+						app: 'payment',
+						payload: {
+							asset: '{$asset1}',
+							outputs: [
+								{address: '{trigger.data.recipient}', amount: '{trigger.data.amount}'},
+							]
+						}
+					},
+					{
+						app: 'state',
+						state: `{
+							$supply2 = var['supply2'];
+							$old_supply1 = var['supply1'];
+							$new_supply1 = $old_supply1 + trigger.data.amount;
+						//	var['dilution_factor'] *= ($old_supply1/$new_supply1)^$m;
+							var['dilution_factor'] *= $get_reserve($old_supply1, $supply2) / $get_reserve($new_supply1, $supply2);
+							var['supply1'] += trigger.data.amount;
+						}`
+					}
+				]
+			},
+
+			// mint or redeem tokens
+			{
+				if: `{ $ready AND (trigger.output[[asset=$reserve_asset]] > $min_contribution AND (trigger.data.tokens1 OR trigger.data.tokens2) OR trigger.output[[asset=$asset1]] > 0 OR trigger.output[[asset=$asset2]] > 0) }`,
+				init: `{
+					if (trigger.data.tokens1_to AND !is_valid_address(trigger.data.tokens1_to))
+						bounce("bad tokens1_to address");
+					if (trigger.data.tokens2_to AND !is_valid_address(trigger.data.tokens2_to))
+						bounce("bad tokens2_to address");
+					if (trigger.data.reserve_to AND !is_valid_address(trigger.data.reserve_to))
+						bounce("bad reserve_to address");
+					if (trigger.data.to AND !is_valid_address(trigger.data.to))
+						bounce("bad to address");
+					$tokens1_to = trigger.data.tokens1_to OTHERWISE trigger.data.to OTHERWISE trigger.address;
+					$tokens2_to = trigger.data.tokens2_to OTHERWISE trigger.data.to OTHERWISE trigger.address;
+					$reserve_to = trigger.data.reserve_to OTHERWISE trigger.data.to OTHERWISE trigger.address;
+
+					if (trigger.data.tokens1 AND (!is_integer(trigger.data.tokens1) OR trigger.data.tokens1 <= 0))
+						bounce("invalid number of tokens1");
+					if (trigger.data.tokens2 AND (!is_integer(trigger.data.tokens2) OR trigger.data.tokens2 <= 0))
+						bounce("invalid number of tokens2");
+					if (trigger.data.tokens1 AND trigger.output[[asset=$asset1]] > 0)
+						bounce("both tokens1 param and amount");
+					if (trigger.data.tokens2 AND trigger.output[[asset=$asset2]] > 0)
+						bounce("both tokens2 param and amount");
+					$tokens1 = trigger.data.tokens1 OTHERWISE -trigger.output[[asset=$asset1]];
+					$tokens2 = trigger.data.tokens2 OTHERWISE -trigger.output[[asset=$asset2]];
+					
+					$tokens1_to_aa = $tokens1 > 0 AND $tokens1_to != trigger.address AND is_aa($tokens1_to);
+					$tokens2_to_aa = $tokens2 > 0 AND $tokens2_to != trigger.address AND is_aa($tokens2_to);
+					$full_network_fee = $network_fee + ($reserve_asset == 'base' ? ($tokens1_to_aa ? $aa2aa_bytes : 0) + ($tokens2_to_aa ? $aa2aa_bytes : 0) : 0);
+
+					$reserve_asset_amount = trigger.output[[asset=$reserve_asset]] - $full_network_fee; // subtract a fee to compensate for network fees
+					$reserve = var['reserve'];
+					if (!$reserve AND ($tokens1 <= 0 OR $tokens2 <= 0))
+						bounce("initial mint must be with both tokens");
+					
+					$res = $get_exchange_result($tokens1, $tokens2);
+					$reserve_needed = $res.reserve_needed;
+					$reserve_delta = $res.reserve_delta;
+					$fee = $res.fee;
+					$regular_fee = $res.regular_fee;
+					$reward = $res.reward;
+					$p2 = $res.p2;
+					$target_p2 = $res.target_p2;
+					$new_distance = $res.new_distance;
+					$turnover = $res.turnover;
+					$fee_percent = $res.fee_percent;
+					$slow_capacity_share = $res.slow_capacity_share;
+					
+					response['p2'] = $p2;
+					response['target_p2'] = $target_p2;
+					response['new_distance'] = $new_distance;
+					response['fee'] = $fee;
+				//	response['term'] = (timestamp - var['rate_update_ts']) / (360 * 24 * 3600);
+					response['growth_factor'] = $get_growth_factor();
+					response['turnover'] = $turnover;
+
+					if ($reserve_delta > 0 AND $reserve_needed > $reserve_asset_amount){
+						$currency = ($reserve_asset == 'base') ? 'bytes' : 'reserve tokens';
+						bounce("expected " || ($reserve_needed + $full_network_fee) || " " || $currency || ", received " || ($reserve_asset_amount + $full_network_fee) /*|| ", growth factor " || $growth_factor*/ || ", p2 " || $p2 || ", target p2 " || $target_p2 || ", new distance " || $new_distance);
+					}
+					$payout = $reserve_asset_amount - $reserve_needed; // it is the change if reserve_delta>0
+					if ($payout < 0)
+						bounce("unexpected payout < 0");
+					if ($payout > 0 AND trigger.data.min_reserve_tokens AND $payout < trigger.data.min_reserve_tokens)
+						bounce("payout would be only " || $payout);
+					if (trigger.data.max_fee_percent AND $fee_percent > trigger.data.max_fee_percent)
+						bounce("fee would be " || $fee_percent || '%');
+					$reserve_to_aa = $payout > 0 AND $reserve_to != trigger.address AND is_aa($reserve_to);
+				}`,
+				messages: [
+					{ // send newly minted tokens1
+						if: "{$tokens1 > 0}",
+						app: 'payment',
+						payload: {
+							asset: `{$asset1}`,
+							outputs: [
+								{address: "{$tokens1_to}", amount: "{ $tokens1 }"}
+							]
+						}
+					},
+					{ // send newly minted tokens2
+						if: "{$tokens2 > 0}",
+						app: 'payment',
+						payload: {
+							asset: `{$asset2}`,
+							outputs: [
+								{address: "{$tokens2_to}", amount: "{ $tokens2 }"}
+							]
+						}
+					},
+					{ // return the change (if any) or pay out the redeemed reserve
+						app: 'payment',
+						payload: {
+							asset: `{$reserve_asset}`,
+							outputs: [
+								{address: "{$reserve_to}", amount: "{ $payout }"},
+								{address: "{$tokens1_to}", amount: "{$aa2aa_bytes}", if: "{ $reserve_asset == 'base' AND $tokens1_to_aa}"},
+								{address: "{$tokens2_to}", amount: "{$aa2aa_bytes}", if: "{ $reserve_asset == 'base' AND $tokens2_to_aa}"},
+							]
+						}
+					},
+					{ // send some bytes to AAs
+						if: "{ $reserve_asset != 'base' }",
+						app: 'payment',
+						payload: {
+							asset: 'base',
+							outputs: [
+								{address: "{$reserve_to}", amount: "{$aa2aa_bytes}", if: "{$reserve_to_aa}"},
+								{address: "{$tokens1_to}", amount: "{$aa2aa_bytes}", if: "{$tokens1_to_aa}"},
+								{address: "{$tokens2_to}", amount: "{$aa2aa_bytes}", if: "{$tokens2_to_aa}"},
+							]
+						}
+					},
+					{ // if we are sending to an AA, make sure its response goes to our requestor
+						if: `{ $tokens1_to_aa OR $tokens2_to_aa OR $reserve_to_aa }`,
+						app: 'data',
+						payload: {
+							to: `{trigger.address}`
+						}
+					},
+					{
+						app: 'state',
+						state: `{
+							var['p2'] = $p2;
+							var['supply1'] += $tokens1;
+							var['supply2'] += $tokens2;
+							var['reserve'] += $reserve_delta;
+							if ($fee){
+								$fee_to_slow_capacitor = floor($slow_capacity_share * $fee);
+								$fee_to_fast_capacitor = $fee - $fee_to_slow_capacitor;
+								var['slow_capacity'] += $fee_to_slow_capacitor;
+								var['fast_capacity'] += $fee_to_fast_capacitor;
+								response['fee%'] = round($fee_percent, 4) || '%';
+							}
+							if ($reward){
+								var['fast_capacity'] -= $reward;
+								response['reward%'] = round($reward / $turnover * 100, 4) || '%';
+							}
+							if ($new_distance > $threshold_distance AND !$lost_peg_ts)
+								var['lost_peg_ts'] = timestamp;
+							if ($new_distance <= $threshold_distance AND $lost_peg_ts)
+								var['lost_peg_ts'] = false;
+						}`
+					}
+				]
+			},
+
+		]
+	}
+}

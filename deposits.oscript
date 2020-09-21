@@ -1,0 +1,562 @@
+{
+	doc_url: "https://ostable.org/bonded-stablecoin-deposits.json",
+	getters: `{
+		$_get_param = ($name, $state_params, $initial_params, $default_params) => {
+			$state_value = $state_params[$name];
+			if (exists($state_value))
+				return $state_value;
+			$initial_value = $initial_params[$name];
+			if (exists($initial_value))
+				return $initial_value;
+			$default_params[$name]
+		};
+
+		$get_curve_aa = () => params.curve_aa;
+
+		$get_curve_aa_params = () => definition[params.curve_aa][1].params;
+
+		$get_deposit_params = () => {
+			$default_params = {
+				min_deposit_term: 2 * 3600,
+				challenging_period: 12 * 3600,
+				challenge_immunity_period: 3600,
+				reporter_share: 0.2, // 20%
+			};
+			$curve_aa_params = $get_curve_aa_params();
+			$deposit_state_params = var[params.curve_aa]['deposit_params'];
+			{
+				min_deposit_term: $_get_param('min_deposit_term', $deposit_state_params, $curve_aa_params.deposits, $default_params),
+				challenging_period: $_get_param('challenging_period', $deposit_state_params, $curve_aa_params.deposits, $default_params),
+				challenge_immunity_period: $_get_param('challenge_immunity_period', $deposit_state_params, $curve_aa_params.deposits, $default_params),
+				reporter_share: $_get_param('reporter_share', $deposit_state_params, $curve_aa_params.deposits, $default_params),
+			}
+		};
+
+	}`,
+	init: `{
+		$bank_aa = 'GV5YXIIRH3DH5FTEECW7IS2EQTAYJJ6S';
+		$curve_aa = params.curve_aa;
+
+		// tokens
+		$asset = var['asset'];
+
+		$interest_rate = var[$curve_aa]['interest_rate'];
+		$term = (timestamp - var[$curve_aa]['rate_update_ts']) / (360 * 24 * 3600); // in years
+		$growth_factor = var[$curve_aa]['growth_factor'] * (1 + $interest_rate)^$term;
+
+		$curve_aa_params = $get_curve_aa_params();
+		$reserve_asset = $curve_aa_params.reserve_asset;// OTHERWISE 'base';
+		$interest_asset = var[$curve_aa]['asset2'];
+
+		$deposit_params = $get_deposit_params();
+		$min_deposit_term = $deposit_params.min_deposit_term;
+		$challenging_period = $deposit_params.challenging_period;
+		$challenge_immunity_period = $deposit_params.challenge_immunity_period;
+		$reporter_share = $deposit_params.reporter_share;
+
+		$remove_deposit = ($id, $stable_amount) => {
+			var['deposit_' || $id] = false;
+			var['supply'] -= $stable_amount;
+		};
+
+	}`,
+	messages: {
+		cases: [
+
+			// define the stable asset
+			{
+				if: `{ trigger.data.define AND !$asset }`,
+				messages: [
+					{
+						app: 'asset',
+						payload: {
+							// without cap
+							is_private: false,
+							is_transferrable: true,
+							auto_destroy: false,
+							fixed_denominations: false,
+							issued_by_definer_only: true,
+							cosigned_by_definer: false,
+							spender_attested: false,
+						}
+					},
+					{ // call back to factory to record our newly defined asset
+						if: `{trigger.data.factory}`,
+						app: 'data',
+						payload: {
+							write_stable_asset: 1,
+							curve_aa: `{$curve_aa}`,
+						}
+					},
+					{
+						if: `{trigger.data.factory}`,
+						app: 'payment',
+						payload: {
+							asset: 'base',
+							outputs: [
+								{address: '{trigger.data.factory}'},
+							]
+						}
+					},
+					{
+						app: 'state',
+						state: `{
+							var['asset'] = response_unit;
+							response['asset'] = response_unit;
+						}`
+					}
+				]
+			},
+
+			// open a deposit in interest token and take a stable token in exchange
+			{
+				if: `{ $asset AND trigger.output[[asset=$interest_asset]] > 0 }`,
+				init: `{
+					if (exists(trigger.data.interest_recipient) AND !is_valid_address(trigger.data.interest_recipient))
+						bounce("bad address of interest recipient");
+					if (exists(trigger.data.to) AND !is_valid_address(trigger.data.to))
+						bounce("bad to-address");
+					if (exists(trigger.data.owner) AND !is_valid_address(trigger.data.owner))
+						bounce("bad owner address");
+					$to = trigger.data.to OTHERWISE trigger.address;
+					$owner = trigger.data.owner OTHERWISE $to;
+					$deposit_amount = trigger.output[[asset=$interest_asset]];
+					$stable_amount = floor($deposit_amount * $growth_factor);
+					$protection = max(0, trigger.output[[asset=$reserve_asset]] - ($reserve_asset == 'base' ? 10000 : 0));
+					$id = trigger.unit;
+				}`,
+				messages: [
+					{
+						app: 'payment',
+						payload: {
+							asset: `{$asset}`,
+							outputs: [
+								{address: "{$to}", amount: "{ $stable_amount }"}
+							]
+						}
+					},
+					{
+						if: `{trigger.data.to AND is_aa(trigger.data.to)}`,
+						app: 'data',
+						payload: {
+							to: `{trigger.address}`
+						}
+					},
+					{
+						app: 'state',
+						state: `{
+							response['id'] = $id;
+							$deposit = {
+								amount: $deposit_amount,
+								stable_amount: $stable_amount,
+								owner: $owner,
+								ts: timestamp,
+							};
+							if (trigger.data.interest_recipient)
+								$deposit.interest_recipient = trigger.data.interest_recipient;
+							if ($protection)
+								$deposit.protection = $protection;
+							var['deposit_' || $id] = $deposit;
+							var['supply'] += $stable_amount;
+						}`
+					}
+				]
+			},
+
+			// close a deposit and get the interest token back
+			{
+				if: `{ $asset AND trigger.output[[asset=$asset]] > 0 AND trigger.data.id }`,
+				init: `{
+					if (exists(trigger.data.to) AND !is_valid_address(trigger.data.to))
+						bounce("bad to-address");
+					$to = trigger.data.to OTHERWISE trigger.address;
+					$id = trigger.data.id;
+					$deposit = var['deposit_' || $id];
+					if (!$deposit)
+						bounce("no such deposit");
+					if (timestamp < $deposit.ts + $min_deposit_term)
+						bounce("the deposit is too new to be closed");
+					$bOwner = ($deposit.owner == trigger.address);
+					$bForceClose = !$bOwner;
+					if (var['deposit_' || $id || '_force_close'])
+						bounce("force-close already requested");
+					if ($deposit.interest_recipient AND $deposit.interest_recipient != $deposit.owner OR $bForceClose){
+						$new_stable_amount = floor($deposit.amount * $growth_factor);
+						$interest = $new_stable_amount - $deposit.stable_amount;
+						$expected_stable_amount = $new_stable_amount;
+					}
+					else
+						$expected_stable_amount = $deposit.stable_amount;
+					if ($expected_stable_amount > trigger.output[[asset=$asset]])
+						bounce("expected " || $expected_stable_amount);
+					$change = trigger.output[[asset=$asset]] - $expected_stable_amount;
+					$to_aa = trigger.data.to AND is_aa(trigger.data.to);
+				}`,
+				messages: [
+					{
+						if: '{$bOwner}',
+						app: 'payment',
+						payload: {
+							asset: `{$interest_asset}`,
+							outputs: [
+								{address: "{$to}", amount: "{ $deposit.amount }"}
+							]
+						}
+					},
+					{
+						if: `{$to_aa AND $bOwner}`,
+						app: 'data',
+						payload: {
+							to: `{trigger.address}`
+						}
+					},
+					{
+						if: `{$to_aa AND $bOwner}`,
+						app: 'payment',
+						payload: {
+							asset: 'base',
+							outputs: [
+								{address: "{$to}", amount: 2000}
+							]
+						}
+					},
+					{ // pay the accrued interest to the interest recipient and the change back to the requester
+						app: 'payment',
+						payload: {
+							asset: `{$asset}`,
+							outputs: [
+								{if: '{$interest AND $bOwner}', address: "{$deposit.interest_recipient}", amount: "{ $interest }"},
+								{address: "{trigger.address}", amount: "{$change}"},
+							]
+						}
+					},
+					{ // pay the protection back to the owner (not to the "to" address which is for the interest token only)
+						if: '{$deposit.protection AND $bOwner}',
+						app: 'payment',
+						payload: {
+							asset: `{$reserve_asset}`,
+							outputs: [
+								{address: "{$deposit.owner}", amount: "{ $deposit.protection }"}
+							]
+						}
+					},
+					{
+						app: 'state',
+						state: `{
+							if ($bOwner)
+								$remove_deposit($id, $deposit.stable_amount);
+							else // force close
+								var['deposit_' || $id || '_force_close'] = {
+									ts: timestamp,
+									closer: trigger.address,
+									interest: $interest,
+									protection_ratio: $deposit.protection / $deposit.amount,
+								};
+						}`
+					}
+				]
+			},
+
+			// commit a force-close
+			{
+				if: `{ $asset AND trigger.data.commit_force_close AND trigger.data.id }`,
+				init: `{
+					$id = trigger.data.id;
+					$deposit = var['deposit_' || $id];
+					if (!$deposit)
+						bounce("no such deposit");
+					$force_close = var['deposit_' || $id || '_force_close'];
+					if (!$force_close)
+						bounce("this deposit was not force closed");
+					if (timestamp < $force_close.ts + $challenging_period)
+						bounce("challenging period has not expired yet");
+					$interest_recipient = $deposit.interest_recipient OTHERWISE $deposit.owner;
+
+					$payments = [
+						{ // the closer gets the deposited interest asset
+							address: $force_close.closer,
+							asset: $interest_asset,
+							amount: $deposit.amount
+						},
+						{ // pay the accrued interest to the interest recipient
+							// interest is remembered from the time of the request, it stops accruing during the challenging period
+							address: $interest_recipient,
+							asset: $asset,
+							amount: $force_close.interest
+						},
+						{ // pay the protection back to the owner
+							address: $deposit.owner,
+							asset: $reserve_asset,
+							amount: $deposit.protection
+						},
+					];
+					foreach($payments, 3, ($i, $payment) => {
+						$payments[$i].is_aa = is_aa($payment.address);
+					});
+					$res = $bank_aa.$get_payment_messages($payments);
+
+					$payment_messages = $res.payment_messages;
+					$buffer_recipients = $res.buffer_recipients;
+				}`,
+				messages: [
+					`{$payment_messages[0] OTHERWISE ''}`,
+					`{$payment_messages[1] OTHERWISE ''}`,
+					`{$payment_messages[2] OTHERWISE ''}`,
+					`{$payment_messages[3] OTHERWISE ''}`,
+					{
+						if: `{length($buffer_recipients)}`,
+						app: 'data',
+						payload: {
+							recipients: `{$buffer_recipients}`
+						}
+					},
+					{
+						app: 'state',
+						state: `{
+							$remove_deposit($id, $deposit.stable_amount);
+							var['deposit_' || $id || '_force_close'] = false;
+							var['last_force_closed_protection_ratio'] = $force_close.protection_ratio;
+						}`
+					}
+				]
+			},
+
+			// challenge a force-close
+			{
+				if: `{ $asset AND trigger.data.challenge_force_close AND trigger.data.id AND trigger.data.weaker_id }`,
+				init: `{
+					$id = trigger.data.id;
+					$weaker_id = trigger.data.weaker_id;
+
+					$deposit = var['deposit_' || $id];
+					if (!$deposit)
+						bounce("deposit not found");
+					
+					// challenge is accepted even if the request has already expired but has not been committed yet
+					$force_close = var['deposit_' || $id || '_force_close'];
+					if (!$force_close)
+						bounce("this deposit was not force closed");
+					
+					$weaker_deposit = var['deposit_' || $weaker_id];
+					if (!$weaker_deposit)
+						bounce("weaker deposit doesn't exist");
+					
+					if (var['deposit_' || $weaker_id || '_force_close'])
+						bounce("the weaker deposit is also challenged");
+					
+					if ($weaker_deposit.ts + $min_deposit_term + $challenge_immunity_period > $force_close.ts)
+						bounce("the weaker deposit is too new");
+					
+					$weaker_protection_withdrawal_ts = $weaker_deposit.protection_withdrawal_ts OTHERWISE 0;
+					if ($weaker_protection_withdrawal_ts > $force_close.ts - $challenge_immunity_period)
+						bounce("weaker deposit's protection was decreased recently");
+					
+					$weaker_protection_ratio = $weaker_deposit.protection / $weaker_deposit.amount;
+					if ($weaker_protection_ratio >= $force_close.protection_ratio)
+						bounce("the weaker deposit does not appear to be weaker: " || $weaker_protection_ratio);
+					
+					$closer_amount = $deposit.stable_amount + $force_close.interest;
+					$reporter_reward_amount = ceil($closer_amount * $reporter_share);
+					$closer_refund_amount = $closer_amount - $reporter_reward_amount;
+
+					// pay the reward to the reporter and refund the rest to the closer
+					$payments = [
+						{
+							address: $force_close.closer,
+							asset: $asset,
+							amount: $closer_refund_amount,
+							is_aa: is_aa($force_close.closer)
+						},
+						{
+							address: trigger.address,
+							asset: $asset,
+							amount: $reporter_reward_amount,
+							is_aa: false // it might be an AA but the reporter is supposed to know what he's doing
+						},
+					];
+					$res = $bank_aa.$get_payment_messages($payments);
+					$payment_messages = $res.payment_messages;
+					$buffer_recipients = $res.buffer_recipients;
+				}`,
+				messages: [
+					`{$payment_messages[0] OTHERWISE ''}`,
+					`{$payment_messages[1] OTHERWISE ''}`,
+					{
+						if: `{length($buffer_recipients)}`,
+						app: 'data',
+						payload: {
+							recipients: `{$buffer_recipients}`
+						}
+					},
+					{
+						app: 'state',
+						state: `{
+							// discard the fraudulent close request
+							var['deposit_' || $id || '_force_close'] = false;
+						}`
+					}
+				]
+			},
+
+			// add protection
+			{
+				if: `{ $asset AND trigger.data.id AND trigger.data.add_protection AND trigger.output[[asset=$reserve_asset]] > 0 }`,
+				init: `{
+					$id = trigger.data.id;
+					if (exists(trigger.data.to) AND !is_valid_address(trigger.data.to))
+						bounce("bad to-address");
+					$to = trigger.data.to OTHERWISE trigger.address;
+					$deposit = var['deposit_' || $id];
+					if (!$deposit)
+						bounce("deposit not found");
+					if ($deposit.owner != $to)
+						bounce("you are not the owner");
+				}`,
+				messages: [
+					{
+						app: 'state',
+						state: `{
+							$deposit.protection = $deposit.protection + trigger.output[[asset=$reserve_asset]];
+							var['deposit_' || $id] = $deposit;
+						}`
+					}
+				]
+			},
+
+			// withdraw protection
+			{
+				if: `{ $asset AND trigger.data.id AND trigger.data.withdraw_protection AND trigger.data.amount }`,
+				init: `{
+					$id = trigger.data.id;
+					if (exists(trigger.data.to) AND !is_valid_address(trigger.data.to))
+						bounce("bad to-address");
+					$to = trigger.data.to OTHERWISE trigger.address;
+					$deposit = var['deposit_' || $id];
+					if (!$deposit)
+						bounce("deposit not found");
+					if ($deposit.owner != trigger.address)
+						bounce("you are not the owner");
+					$amount = trigger.data.amount;
+					if ($amount == 'all')
+						$withdraw_amount = $deposit.protection;
+					else {
+						if (!is_integer($amount) OR $amount <= 0)
+							bounce("bad amount: " || $amount);
+						$withdraw_amount = $amount;
+					}
+					if ($withdraw_amount > $deposit.protection)
+						bounce("trying to withdraw more than you have: " || $deposit.protection);
+				}`,
+				messages: [
+					{
+						app: 'payment',
+						payload: {
+							asset: `{$reserve_asset}`,
+							outputs: [
+								{address: "{$to}", amount: "{ $withdraw_amount }"}
+							]
+						}
+					},
+					{
+						app: 'state',
+						state: `{
+							$deposit.protection = $deposit.protection - $withdraw_amount;
+							$deposit.protection_withdrawal_ts = timestamp;
+							var['deposit_' || $id] = $deposit;
+						}`
+					}
+				]
+			},
+
+			// change the interest recipient
+			{
+				if: `{ $asset AND trigger.data.id AND trigger.data.change_interest_recipient }`,
+				init: `{
+					// if trigger.data.interest_recipient is not specified then the owner wants to get interest himself
+					if (exists(trigger.data.interest_recipient) AND !is_valid_address(trigger.data.interest_recipient))
+						bounce("bad address of new interest recipient");
+					$id = trigger.data.id;
+					$deposit = var['deposit_' || $id];
+					if (!$deposit)
+						bounce("deposit not found");
+					if ($deposit.owner != trigger.address)
+						bounce("you are not the owner");
+					if (var['deposit_' || $id || '_force_close'])
+						bounce("force-close requested, can't change interest recipient");
+					$old_recipient = $deposit.interest_recipient OTHERWISE trigger.address;
+					$new_stable_amount = floor($deposit.amount * $growth_factor);
+					$interest = $new_stable_amount - $deposit.stable_amount;
+					if ($interest < 0)
+						bounce("negative interest?");
+				}`,
+				messages: [
+					{ // pay the accrued interest to the old recipient
+						if: '{$interest > 0}',
+						app: 'payment',
+						payload: {
+							asset: `{$asset}`,
+							outputs: [
+								{address: "{$old_recipient}", amount: "{ $interest }"}
+							]
+						}
+					},
+					{
+						app: 'state',
+						state: `{
+							$deposit.stable_amount = $new_stable_amount;
+							if (trigger.data.interest_recipient)
+								$deposit.interest_recipient = trigger.data.interest_recipient;
+							else // can be false to redirect interest to self
+								delete($deposit, 'interest_recipient');
+							var['deposit_' || $id] = $deposit;
+							var['supply'] += $interest;
+						}`
+					}
+				]
+			},
+
+			// get interest
+			{
+				if: `{ $asset AND trigger.data.id }`,
+				init: `{
+					$id = trigger.data.id;
+					$deposit = var['deposit_' || $id];
+					if (!$deposit)
+						bounce("deposit not found");
+					$recipient = $deposit.interest_recipient OTHERWISE trigger.address;
+					// if interest recipient is not assigned, only the owner can trigger an interest payment
+					if (!$deposit.interest_recipient AND $deposit.owner != trigger.address)
+						bounce("you are not the owner");
+					if (var['deposit_' || $id || '_force_close'])
+						bounce("force-close requested, can't pay interest");
+					$new_stable_amount = floor($deposit.amount * $growth_factor);
+					$interest = $new_stable_amount - $deposit.stable_amount;
+					if ($interest < 0)
+						bounce("negative interest?");
+				//	if ($interest == 0)
+				//		bounce("0 interest accrued");
+				}`,
+				messages: [
+					{
+						app: 'payment',
+						payload: {
+							asset: `{$asset}`,
+							outputs: [
+								{address: "{$recipient}", amount: "{ $interest }"}
+							]
+						}
+					},
+					{
+						app: 'state',
+						state: `{
+							$deposit.stable_amount = $new_stable_amount;
+							var['deposit_' || $id] = $deposit;
+							var['supply'] += $interest;
+						}`
+					}
+				]
+			},
+
+		]
+	}
+}

@@ -1,0 +1,20 @@
+{
+	messages: [
+		{
+			app: 'payment',
+			payload: {
+				asset: 'base',
+				outputs: [
+					{ address: "{ trigger.address }" }
+				]
+			}
+		},
+		{
+			app: 'data',
+			payload: {
+				define: 1,
+				factory: `{trigger.data.factory}`,
+			}
+		},
+	]
+}

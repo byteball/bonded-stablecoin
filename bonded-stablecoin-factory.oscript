@@ -1,0 +1,250 @@
+{
+	doc_url: "https://ostable.org/bonded-stablecoin-factory.json",
+	init: `{
+		$stablecoin_base_aa = 'FCFYMFIOGS363RLDLEWIDBIIBU7M7BHP';
+		$stablecoin_deposit_base_aa = 'GEZGVY4T3LK6N4NJAKNHNQIVAI5OYHPC';
+	}`,
+	messages: {
+		cases: [
+
+			// accept a callback from a newly created AA to record its newly defined assets
+			{
+				if: `{trigger.data.asset1 AND var['curve_' || trigger.address]}`,
+				init: `{
+					$deposit_aa = [
+						'autonomous agent',
+						{
+							base_aa: $stablecoin_deposit_base_aa,
+							params: {
+								curve_aa: trigger.address
+							}
+						}
+					];
+					$deposit_aa_address = chash160($deposit_aa);
+				}`,
+				messages: [
+					{
+						app: 'definition',
+						payload: {
+							definition: `{$deposit_aa}`
+						}
+					},
+					{
+						app: 'payment',
+						payload: {
+							asset: 'base',
+							outputs: [
+								{ address: "{ $deposit_aa_address }", amount: 6000 }, // I'll get all this money back (minus fees)
+							]
+						}
+					},
+					{
+						app: 'data',
+						payload: {
+							define: 1,
+							factory: `{this_address}`
+						}
+					},
+					{
+						app: 'state',
+						state: `{
+							$governance_aa_address = unit[trigger.unit].messages[[.app='definition']].payload.address;
+							var['asset_' || trigger.address || '_1'] = trigger.data.asset1;
+							var['asset_' || trigger.address || '_2'] = trigger.unit;
+							var['deposit_aa_' || trigger.address] = $deposit_aa_address;
+							var['governance_aa_' || trigger.address] = $governance_aa_address;
+							response['asset_1'] = trigger.data.asset1;
+							response['asset_2'] = trigger.unit;
+							response['address'] = trigger.address;
+							response['deposit_aa'] = $deposit_aa_address;
+							response['governance_aa'] = $governance_aa_address;
+						}`
+					}
+				]
+			},
+
+			// accept a callback from a newly created deposit AA to record its newly defined asset
+			{
+				if: `{trigger.data.write_stable_asset AND var['deposit_aa_' || trigger.data.curve_aa] == trigger.address}`,
+				messages: [
+					{
+						app: 'state',
+						state: `{
+							var['asset_' || trigger.data.curve_aa || '_stable'] = trigger.unit;
+						}`
+					}
+				]
+			},
+
+			// create a new curve
+			{
+				init: `{
+					$reserve_asset = trigger.data.reserve_asset OTHERWISE 'base';
+					if (!asset[$reserve_asset].exists)
+						bounce("reserve asset " || $reserve_asset || " does not exist");
+					
+					$reserve_asset_decimals = trigger.data.reserve_asset_decimals;
+					if (!is_integer($reserve_asset_decimals) OR $reserve_asset_decimals < 0 OR $reserve_asset_decimals > 14)
+						bounce("bad reserve_asset_decimals");
+					
+					$decimals1 = trigger.data.decimals1;
+					if (!is_integer($decimals1) OR $decimals1 < 0 OR $decimals1 > 14)
+						bounce("bad decimals1");
+					
+					$decimals2 = trigger.data.decimals2;
+					if (!is_integer($decimals2) OR $decimals2 < 0 OR $decimals2 > 14)
+						bounce("bad decimals2");
+					
+					$m = trigger.data.m OTHERWISE 2;
+					if (typeof($m) != 'number' OR $m < 0)
+						bounce("bad m");
+					
+					$n = trigger.data.n OTHERWISE 1/2;
+					if (typeof($n) != 'number' OR $n < 0)
+						bounce("bad n");
+
+					$leverage = trigger.data.leverage OTHERWISE 0;
+					if (typeof($leverage) != 'number')
+						bounce("bad leverage");
+
+					$interest_rate = trigger.data.interest_rate OTHERWISE 0;
+					if (typeof($interest_rate) != 'number' OR $interest_rate < 0)
+						bounce("bad interest_rate");
+					
+					$fee_multiplier = trigger.data.fee_multiplier OTHERWISE 5;
+					if (typeof($fee_multiplier) != 'number' OR $fee_multiplier <= 0)
+						bounce("bad fee_multiplier");
+					
+					$moved_capacity_share = trigger.data.moved_capacity_share OTHERWISE 0.1;
+					if (typeof($moved_capacity_share) != 'number' OR $moved_capacity_share <= 0)
+						bounce("bad moved_capacity_share");
+					
+					$threshold_distance = trigger.data.threshold_distance OTHERWISE 0.01;
+					if (typeof($threshold_distance) != 'number' OR $threshold_distance <= 0)
+						bounce("bad threshold_distance");
+					
+					$move_capacity_timeout = trigger.data.move_capacity_timeout OTHERWISE 2*3600;
+					if (!is_integer($move_capacity_timeout) OR $move_capacity_timeout <= 0)
+						bounce("bad move_capacity_timeout");
+					
+					$slow_capacity_share = trigger.data.slow_capacity_share; // use AA default if missing
+					if (exists($slow_capacity_share) AND (typeof($slow_capacity_share) != 'number' OR $slow_capacity_share < 0))
+						bounce("bad slow_capacity_share");
+					
+					$params = {
+						leverage: $leverage,
+						m: $m,
+						n: $n,
+						allow_grants: !!trigger.data.allow_grants,
+						allow_oracle_change: !!trigger.data.allow_oracle_change,
+						reserve_asset: $reserve_asset,
+						reserve_asset_decimals: $reserve_asset_decimals,
+						decimals1: $decimals1,
+						decimals2: $decimals2,
+						interest_rate: $interest_rate,
+						fee_multiplier: $fee_multiplier,
+						moved_capacity_share: $moved_capacity_share,
+						threshold_distance: $threshold_distance,
+						move_capacity_timeout: $move_capacity_timeout,
+						slow_capacity_share: $slow_capacity_share,
+					};
+					
+					foreach(['oracle1', 'oracle2', 'oracle3'], 3, $p => {
+						$oracle = trigger.data[$p];
+						if (exists($oracle) AND !is_valid_address($oracle))
+							bounce("bad " || $p);
+						$params[$p] = $oracle;
+					});
+					foreach(['feed_name1', 'feed_name2', 'feed_name3'], 3, $p => {
+						$feed_name = trigger.data[$p];
+						if (exists($feed_name) AND typeof($feed_name) != 'string')
+							bounce("bad " || $p);
+						$params[$p] = $feed_name;
+					});
+					foreach(['op1', 'op2', 'op3'], 3, $p => {
+						$op = trigger.data[$p];
+						if (exists($op) AND $op != '*' AND $op != '/')
+							bounce("bad " || $p);
+						$params[$p] = $op;
+					});
+
+					$governance_params = ['regular_challenging_period', 'important_challenging_period', 'freeze_period', 'proposal_min_support'];
+					foreach($governance_params, 4, $p => {
+						$value = trigger.data[$p]; // use AA default if missing
+						if (exists($value)) {
+							if ($p == 'proposal_min_support'){
+								if (typeof($value) != 'number' OR $value < 0 OR $value > 1)
+									bounce("bad " || $p);
+							}
+							else {
+								if (!is_integer($value) OR $value < 0)
+									bounce("bad " || $p);
+							}
+							$params[$p] = $value;
+						}
+					});
+
+					$deposit_params = ['min_deposit_term', 'challenging_period', 'challenge_immunity_period', 'reporter_share'];
+					foreach($deposit_params, 4, $p => {
+						if (exists(trigger.data.deposits[$p])) // nested list of params
+							$value = trigger.data.deposits[$p];
+						else if (exists(trigger.data['deposits.' || $p])) // flat list
+							$value = trigger.data['deposits.' || $p];
+						else
+							return; // use AA default if missing
+						if ($p == 'reporter_share'){
+							if (typeof($value) != 'number' OR $value < 0 OR $value > 1)
+								bounce("bad " || $p);
+						}
+						else {
+							if (!is_integer($value) OR $value < 0)
+								bounce("bad " || $p);
+						}
+						$params.deposits[$p] = $value;
+					});
+
+					$curve_aa = [
+						'autonomous agent',
+						{
+							base_aa: $stablecoin_base_aa,
+							params: $params
+						}
+					];
+					$curve_aa_address = chash160($curve_aa);
+				}`,
+				messages: [
+					{
+						app: 'payment',
+						payload: {
+							asset: 'base',
+							outputs: [
+								{ address: "{ $curve_aa_address }", amount: 8000 }, // I'll get all this money back (minus fees)
+							]
+						}
+					},
+					{
+						app: 'data',
+						payload: {
+							define: 1,
+							factory: `{this_address}`
+						}
+					},
+					{
+						app: 'definition',
+						payload: {
+							definition: `{$curve_aa}`
+						}
+					},
+					{
+						app: 'state',
+						state: `{
+						//	$aa_address = unit[response_unit].messages[[.app='definition']].payload.address;
+							var['curve_' || $curve_aa_address] = "s1^"||$m||" s2^"||$n;
+						}`
+					}
+				]
+
+			}
+		]
+	}
+}
