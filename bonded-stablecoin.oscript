@@ -176,7 +176,7 @@
 	}`,
 	init: `{
 		$define_asset2_forwarder = 'FNSRIUI7TPKK23PTR6MIXCPFIUSOKP2K';
-		$governance_base_aa = 'Y4VBXMROK5BWBKSYYAMUW7QUEZFXYBCF';
+		$governance_base_aa = 'UUPBIWDWQ7Q4WXS5CWSEKUQE34FG6L55';
 
 		$aa2aa_bytes = 2000;
 		
