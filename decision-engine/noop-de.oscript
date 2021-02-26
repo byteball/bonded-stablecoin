@@ -1,0 +1,11 @@
+// no-op decision engine, for tests only
+{
+	messages: [
+		{
+			app: 'state',
+			state: `{
+				response['message'] = "Did nothing";
+			}`
+		},
+	]
+}

@@ -1,0 +1,352 @@
+{
+	doc_url: "https://ostable.org/default-decision-engine.json",
+	getters: `{
+		$get_curve_aa = () => params.curve_aa;
+	}`,
+	init: `{
+		$curve_aa = params.curve_aa;
+		$curve_params = definition[$curve_aa][1].params;
+
+		$below_peg_threshold = params.below_peg_threshold OTHERWISE 0.001; // deviation less than 0.1% is ignored
+		$below_peg_timeout = exists(params.below_peg_timeout) ? params.below_peg_timeout : 12 * 3600;
+		$min_reserve_delta = params.min_reserve_delta OTHERWISE 1e5;
+
+		$fund_aa = var[$curve_aa]['fund_aa'];
+
+		// tokens
+		$reserve_asset = $curve_params.reserve_asset OTHERWISE 'base';
+		$asset1 = var[$curve_aa]['asset1'];
+		$shares_asset = var[$fund_aa]['shares_asset'];
+
+		$fee = $reserve_asset == 'base' ? 1e4 : 0; // charged by us
+		$network_fee = ($reserve_asset == 'base') ? 4000 : 0; // charged by the curve
+
+		$get_leverage = () => $curve_params.leverage OTHERWISE 0;
+		$dilution_factor = var[$curve_aa]['dilution_factor'];
+
+		$get_reserve = ($s1, $s2) => {
+			$r = $dilution_factor * $s1^$curve_params.m * $s2^$curve_params.n;
+			$r
+		};
+
+		$get_p2 = ($s1, $s2) => {
+			$p2 = $dilution_factor * $s1^$curve_params.m * $curve_params.n * (/*is_integer($curve_params.n*2) ? sqrt($s2^(($curve_params.n-1)*2)) :*/ $s2^($curve_params.n-1) ); // derivative
+			$p2
+		};
+
+		$get_p1 = () => {
+			$s1 = var[$curve_aa]['supply1']/10^$curve_params.decimals1;
+			$s2 = var[$curve_aa]['supply2']/10^$curve_params.decimals2;
+			$p1_in_full_units = $dilution_factor * $curve_params.m * $s1^($curve_params.m-1) * $s2^$curve_params.n; // derivative
+			$p1_in_smallest_units = $p1_in_full_units * 10^($curve_params.reserve_asset_decimals - $curve_params.decimals1);
+			$p1_in_smallest_units
+		};
+
+		$get_oracles = () => {
+			$oracles = var[$curve_aa]['oracles'];
+			if ($oracles)
+				return $oracles;
+			$initial_oracles = [];
+			if ($curve_params.oracle1 AND $curve_params.feed_name1)
+				$initial_oracles[] = {oracle: $curve_params.oracle1, feed_name: $curve_params.feed_name1, op: $curve_params.op1 OTHERWISE '*'};
+			if ($curve_params.oracle2 AND $curve_params.feed_name2)
+				$initial_oracles[] = {oracle: $curve_params.oracle2, feed_name: $curve_params.feed_name2, op: $curve_params.op2 OTHERWISE '*'};
+			if ($curve_params.oracle3 AND $curve_params.feed_name3)
+				$initial_oracles[] = {oracle: $curve_params.oracle3, feed_name: $curve_params.feed_name3, op: $curve_params.op3 OTHERWISE '*'};
+			$initial_oracles
+		};
+
+		$get_initial_interest_rate = () => exists($curve_params.interest_rate) ? $curve_params.interest_rate : 0.1; // 10%
+
+		$get_interest_rate = () => {
+			$interest_rate_var = var[$curve_aa]['interest_rate'];
+			exists($interest_rate_var) ? $interest_rate_var : $get_initial_interest_rate()
+		};
+
+		$get_growth_factor = () => {
+			$interest_rate = $get_interest_rate();
+			$term = (timestamp - var[$curve_aa]['rate_update_ts']) / (360 * 24 * 3600); // in years
+			$growth_factor = var[$curve_aa]['growth_factor'] * (1 + $interest_rate)^$term;
+			$growth_factor
+		};
+
+		$get_oracle_price = () => {
+			$oracles = $get_oracles();
+			$oracle_price = reduce($oracles, 3, ($price, $oracle_info) => {
+				$df = data_feed[[oracles=$oracle_info.oracle, feed_name=$oracle_info.feed_name]];
+				($oracle_info.op == '*') ? $price * $df : $price / $df
+			}, 1);
+			$oracle_price
+		};
+
+		$get_target_p2 = () => {
+			$target_p2 = $get_oracle_price()^($get_leverage() - 1) * $get_growth_factor();
+			$target_p2
+		};
+
+		$get_exchange_data = () => {
+			$supply1 = var[$curve_aa]['supply1'];
+			$supply2 = var[$curve_aa]['supply2'];
+			$reserve = var[$curve_aa]['reserve'];
+
+			$decimals1 = $curve_params.decimals1;
+			$decimals2 = $curve_params.decimals2;
+			$reserve_asset_decimals = $curve_params.reserve_asset_decimals;
+			
+			$m = $curve_params.m;
+			$n = $curve_params.n;
+
+			$data = {};
+			$data.target_p2 = $get_target_p2();
+			$s2 = $supply2/10^$decimals2;
+
+			// try full fixing first
+			$target_s1 = ($data.target_p2/$n * $s2^(1-$n))^(1/$m);
+			$data.tokens1_delta = round($target_s1 * 10^$decimals1) - $supply1;
+			$data.new_s1 = ($supply1 + $data.tokens1_delta) / 10^$decimals1;
+			$data.reserve_delta = ceil($get_reserve($data.new_s1, $s2) * 10^$reserve_asset_decimals) - $reserve;
+
+			$reserve_balance = balance[$fund_aa][$reserve_asset];
+			if ($data.reserve_delta > $reserve_balance){ // partial fixing
+				$data.reserve_delta = $reserve_balance;
+				$new_reserve = $reserve + $reserve_balance;
+				$new_r = $new_reserve/10^$reserve_asset_decimals;
+				$data.new_s1 = ($new_r/$s2^$n)^(1/$m);
+				$data.tokens1_delta = round($data.new_s1 * 10^$decimals1) - $supply1;
+				if ($data.tokens1_delta < 0)
+					bounce("partial tokens1_delta < 0");
+				$data.partial = true;
+			}
+
+			// calc the reward
+			$data.current_p2 = var[$curve_aa]['p2'];
+			$distance = abs($data.current_p2 - $data.target_p2) / $data.target_p2;
+			$data.new_p2 = $get_p2($data.new_s1, $s2); // if with full fixing, might be slightly different from target_p2 due to limited precision of s1
+			$new_distance = abs($data.new_p2 - $data.target_p2) / $data.target_p2; // zero or very close
+			$reward = floor((1 - $new_distance/$distance) * var[$curve_aa]['fast_capacity']);
+			$data.reserve_needed = $data.reserve_delta - $reward; // network fee is added later
+
+			$data
+		};
+
+		$p1 = $get_p1();
+
+		$get_total_assets = () => {
+			balance[$fund_aa][$reserve_asset] + $p1 * balance[$fund_aa][$asset1]
+		};
+
+
+		$redemption = var['redemption'];
+
+		if (trigger.data.to AND !is_valid_address(trigger.data.to))
+			bounce("bad to address");
+		$to = trigger.data.to OTHERWISE trigger.address;
+
+	}`,
+	messages: {
+		cases: [
+
+			// fix the price
+			{
+				if: `{ (trigger.data.tx AND trigger.address == $curve_aa) OR trigger.data.act }`,
+				init: `{
+					$below_peg_ts = var['below_peg_ts'];
+
+					$request_data = {payments: []};
+
+					// finishing a redemption
+					if ($redemption){
+						if (trigger.address != $curve_aa)
+							bounce("BUG: redemption is still active");
+						$res = trigger.data.tx.res;
+						$request_data.payments[] = {
+							asset: $reserve_asset,
+							address: $redemption.address,
+							amount: $redemption.reserve_amount - $res.reserve_needed - $network_fee
+						};
+					}
+
+					$data = $get_exchange_data();
+					$below_peg = ($data.current_p2 < $data.target_p2);
+					$large_below_peg = $below_peg AND ($data.target_p2 - $data.current_p2)/$data.target_p2 >= $below_peg_threshold;
+					$tokens1 = $data.tokens1_delta;
+					if (
+						$below_peg AND $below_peg_timeout AND (!$below_peg_ts OR timestamp < $below_peg_ts + $below_peg_timeout)
+						OR abs($tokens1) <= 1 // already on-peg
+						OR abs($data.reserve_delta) < $min_reserve_delta // reserve delta would be too small
+					){
+						// skip fixing
+					}
+					else {
+						$large_below_peg_after = $data.new_p2 < $data.target_p2 AND ($data.target_p2 - $data.new_p2)/$data.target_p2 >= $below_peg_threshold;
+						
+						$bFixing = true;
+						if ($tokens1 > 0){ // will buy T1
+							$request_data.payments[] = {asset: $reserve_asset, address: $curve_aa, amount: $data.reserve_needed + $network_fee};
+							$request_data.forwarded_data = {tokens1: $tokens1};
+						}
+						else if ($tokens1 < 0) // will redeem T1
+							$request_data.payments[] = {asset: $asset1, address: $curve_aa, amount: -$tokens1};
+						
+						if ($reserve_asset != 'base') // to make sure the curve AA has enough bytes to respond
+							$request_data.payments[] = {asset: 'base', address: $curve_aa, amount: 2000};
+					}
+
+					$bSending = length($request_data.payments) > 0;
+				}`,
+				messages: [
+					{
+						if: `{$bSending}`,
+						app: 'data',
+						payload: `{$request_data}`
+					},
+					{
+						if: `{$bSending}`,
+						app: 'payment',
+						payload: {
+							asset: `base`,
+							outputs: [
+								// to trigger the fund AA and make sure it has enough bytes to respond
+								{address: "{$fund_aa}", amount: 2000}
+							]
+						}
+					},
+					{
+						app: 'state',
+						state: `{
+							if ($large_below_peg AND !$below_peg_ts AND $below_peg_timeout)
+								var['below_peg_ts'] = timestamp;
+							if ((!$large_below_peg OR $bFixing AND !$large_below_peg_after) AND $below_peg_ts)
+								var['below_peg_ts'] = false;
+							if ($redemption)
+								var['redemption'] = false;
+							if ($bSending)
+								response['message'] = $data.partial ? "DE partially fixed the peg" : "DE fixed the peg";
+							else
+								response['message'] = "DE does not interfere yet";
+						}`
+					}
+				]
+			},
+
+
+
+			// buy shares from the AA
+			{
+				if: `{ $shares_asset AND (trigger.output[[asset=$reserve_asset]] > 0) AND trigger.output[[asset=$shares_asset]] == 0 }`,
+				init: `{
+					if ($redemption)
+						bounce("BUG: redeeming");
+					$received_reserve_amount = trigger.output[[asset=$reserve_asset]] - $fee;
+					if ($received_reserve_amount <= 0)
+						bounce("0 contribution");
+
+					$balance = $get_total_assets(); // before the purchase
+
+					$shares_supply = var[$fund_aa]['shares_supply'] OTHERWISE 0;
+					if ($shares_supply > 0 AND $balance == 0)
+						bounce("shares_supply > 0 AND balance == 0");
+					$share_price = $shares_supply ? $balance / $shares_supply : 1;
+					$shares_amount = floor($received_reserve_amount / $share_price);
+					$request_data = {payments: [{asset: $shares_asset, address: $to, amount: $shares_amount}]};
+
+					// first issue
+					if (!var[$curve_aa]['supply1'] AND !var[$curve_aa]['supply2'] AND !var[$curve_aa]['reserve']){
+						$m = $curve_params.m;
+						$n = $curve_params.n;
+						$target_p2 = $get_target_p2();
+						$r = ($received_reserve_amount - $network_fee) / 10^$curve_params.reserve_asset_decimals;
+						$s2 = $n * $r / $target_p2;
+						$s1 = ($r / $s2^$n)^(1/$m);
+						$tokens2 = floor($s2 * 10^$curve_params.decimals2);
+						$tokens1 = floor($s1 * 10^$curve_params.decimals1);
+						$request_data.payments[] = {asset: $reserve_asset, address: $curve_aa, amount: $received_reserve_amount};
+						$request_data.forwarded_data = {tokens1: $tokens1, tokens2: $tokens2};
+					}
+				}`,
+				messages: [
+					{
+						app: 'payment',
+						payload: {
+							asset: '{$reserve_asset}',
+							outputs: [
+								{address: "{$fund_aa}", amount: "{$received_reserve_amount + $fee/2}"}
+							]
+						}
+					},
+					{
+						if: `{$reserve_asset != 'base'}`,
+						app: 'payment',
+						payload: {
+							asset: 'base',
+							outputs: [
+								{address: "{$fund_aa}", amount: "{trigger.output[[asset=base]] - 1000}"}
+							]
+						}
+					},
+					{
+						app: 'data',
+						payload: `{$request_data}`
+					}
+				]
+			},
+
+
+			// redeem shares
+			{
+				if: `{ $shares_asset AND trigger.output[[asset=$shares_asset]] > 0 }`,
+				init: `{
+					if ($redemption)
+						bounce("BUG: already redeeming");
+					$received_shares_amount = trigger.output[[asset=$shares_asset]];
+					$shares_supply = var[$fund_aa]['shares_supply'];
+					$my_share = $received_shares_amount/$shares_supply;
+					$reserve_amount = floor($my_share * balance[$fund_aa][$reserve_asset]);
+					$t1_amount = floor($my_share * balance[$fund_aa][$asset1]);
+
+					$payments = [{asset: $asset1, address: $curve_aa, amount: $t1_amount}];
+				}`,
+				messages: [
+					{
+						app: 'payment',
+						payload: {
+							asset: '{$shares_asset}',
+							outputs: [
+								{address: "{$fund_aa}", amount: "{$received_shares_amount}"}
+							]
+						}
+					},
+					{
+						app: 'payment',
+						payload: {
+							asset: 'base',
+							outputs: [
+								{address: "{$fund_aa}", amount: "{trigger.output[[asset=base]] - 1000}"}
+							]
+						}
+					},
+					{
+						app: 'data',
+						payload: {
+							payments: `{$payments}`,
+							forwarded_data: {notifyDE: 1}, // we'll be called back from the curve AA
+						}
+					},
+					{
+						app: 'state',
+						state: `{
+							var['redemption'] = {
+								address: $to,
+								reserve_amount: $reserve_amount,
+								t1_amount: $t1_amount,
+							};
+						}`
+					}
+
+				]
+			},
+
+
+		]
+	}
+}

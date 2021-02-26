@@ -1,0 +1,140 @@
+{
+	doc_url: "https://ostable.org/stability-fund.json",
+	getters: `{
+		$get_curve_aa = () => params.curve_aa;
+	}`,
+	init: `{
+		$curve_aa = params.curve_aa;
+
+		$decision_engine_aa = var[$curve_aa]['decision_engine_aa'];
+
+		// tokens
+		$shares_asset = var['shares_asset'];
+
+
+		$get_payment_messages = ($payments) => {
+			$payment_messages_by_asset = {};
+			foreach($payments, 5, $payment => {
+				if (!$payment.amount)
+					return;
+				$address = $payment.address;
+				if ($payment_messages_by_asset[$payment.asset])
+					$payment_messages_by_asset[$payment.asset].payload.outputs[] = {address: $address, amount: $payment.amount};
+				else
+					$payment_messages_by_asset[$payment.asset] = {
+						app: 'payment',
+						payload: {
+							asset: $payment.asset,
+							outputs: [
+								{address: $address, amount: $payment.amount}
+							]
+						}
+					};
+			});
+
+			$payment_messages = [];
+			foreach($payment_messages_by_asset, 5, $payment_message => {
+				$payment_messages[] = $payment_message;
+			});
+			$payment_messages
+		};
+
+	}`,
+	messages: {
+		cases: [
+
+			// define the shares asset
+			{
+				if: `{ trigger.data.define AND !$shares_asset }`,
+				messages: [
+					{
+						app: 'asset',
+						payload: {
+							// without cap
+							is_private: false,
+							is_transferrable: true,
+							auto_destroy: false,
+							fixed_denominations: false,
+							issued_by_definer_only: true,
+							cosigned_by_definer: false,
+							spender_attested: false,
+						}
+					},
+					{ // call back to the curve AA to let it know our shares asset
+						app: 'payment',
+						payload: {
+							asset: 'base',
+							outputs: [
+								{address: '{trigger.address}'}, // send all
+							]
+						}
+					},
+					{
+						if: `{trigger.data.factory}`,
+						app: 'data',
+						payload: {
+							define: 1,
+							factory: `{trigger.data.factory}`,
+						}
+					},
+					{
+						app: 'state',
+						state: `{
+							var['shares_asset'] = response_unit;
+							response['shares_asset'] = response_unit;
+						}`
+					}
+				]
+			},
+
+
+			// execute an order from the decision engine
+			{
+				if: `{ $shares_asset AND trigger.address == $decision_engine_aa AND trigger.data.payments }`,
+				init: `{
+					$received_shares_amount = trigger.output[[asset=$shares_asset]];
+					$issued_shares_amount = reduce(trigger.data.payments, 5, ($acc, $payment) => $acc + ($payment.asset == $shares_asset ? $payment.amount : 0), 0);
+					$shares_delta = $issued_shares_amount - $received_shares_amount;
+
+					$payment_messages = $get_payment_messages(trigger.data.payments);
+				}`,
+				messages: [
+					`{$payment_messages[0] OTHERWISE ''}`,
+					`{$payment_messages[1] OTHERWISE ''}`,
+					`{$payment_messages[2] OTHERWISE ''}`,
+					`{$payment_messages[3] OTHERWISE ''}`,
+					`{$payment_messages[4] OTHERWISE ''}`,
+					{
+						if: `{trigger.data.forwarded_data AND length(trigger.data.forwarded_data) > 0}`,
+						app: 'data',
+						payload: `{trigger.data.forwarded_data}`
+					},
+					{
+						app: 'state',
+						state: `{
+							if ($shares_delta)
+								var['shares_supply'] += $shares_delta;
+						}`
+					}
+				]
+			},
+
+
+			// silently receive the proceeds from the curve AA
+			{
+				init: `{
+					if (trigger.output[[asset=$shares_asset]])
+						bounce("don't send shares to this AA directly");
+				}`,
+				messages: [
+					{
+						app: 'state',
+						state: `{
+						}`
+					}
+				]
+			},
+
+		]
+	}
+}
