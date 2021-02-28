@@ -178,7 +178,7 @@
 	}`,
 	init: `{
 		$fund_base_aa = '5WOTEURNL2XGGKD2FGM5HEES4NKVCBCR';
-		$decision_engine_base_aa = 'C7OSZ3QEKWAYPAQV45TW7CUJLCQWATN6';
+		$decision_engine_base_aa = 'WUJQDBZTZXMJFPFUXCVXUBD4MXFQRMZI';
 		$governance_base_aa = 'L7GGVULVIY6AAMJ42X62WIFHH6ARGVHC';
 
 		$aa2aa_bytes = 2000;

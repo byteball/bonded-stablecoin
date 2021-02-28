@@ -84,6 +84,8 @@
 			$target_p2
 		};
 
+		$get_distance = ($p2, $target_p2) => (exists($p2) AND exists($target_p2)) ? abs($p2 - $target_p2) / min($p2, $target_p2) : 0;
+
 		$get_exchange_data = () => {
 			$supply1 = var[$curve_aa]['supply1'];
 			$supply2 = var[$curve_aa]['supply2'];
@@ -120,9 +122,9 @@
 
 			// calc the reward
 			$data.current_p2 = var[$curve_aa]['p2'];
-			$distance = abs($data.current_p2 - $data.target_p2) / $data.target_p2;
+			$distance = $get_distance($data.current_p2, $data.target_p2);
 			$data.new_p2 = $get_p2($data.new_s1, $s2); // if with full fixing, might be slightly different from target_p2 due to limited precision of s1
-			$new_distance = abs($data.new_p2 - $data.target_p2) / $data.target_p2; // zero or very close
+			$new_distance = $get_distance($data.new_p2, $data.target_p2); // zero or very close
 			$reward = floor((1 - $new_distance/$distance) * var[$curve_aa]['fast_capacity']);
 			$data.reserve_needed = $data.reserve_delta - $reward; // network fee is added later
 
