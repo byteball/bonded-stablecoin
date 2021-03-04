@@ -2,15 +2,13 @@
 	doc_url: "https://ostable.org/bonded-stablecoin.json",
 	getters: `{
 		$get_reserve = ($s1, $s2) => {
-			$dilution_factor = var['dilution_factor'];
-			$r = $dilution_factor * $s1^params.m * $s2^params.n;
+			$r = $s1^params.m * $s2^params.n;
 			$r
 		};
 
 		$get_p2 = ($s1, $s2) => {
 		//	$p2 = ($get_reserve($s1, $s2 + 0.001*$s2) - $get_reserve($s1, $s2))/(0.001*$s2); // derivative
-			$dilution_factor = var['dilution_factor'];
-			$p2 = $dilution_factor * $s1^params.m * params.n * $s2^(params.n-1); // derivative
+			$p2 = $s1^params.m * params.n * $s2^(params.n-1); // derivative
 			$p2
 		};
 
@@ -178,8 +176,8 @@
 	}`,
 	init: `{
 		$fund_base_aa = '5WOTEURNL2XGGKD2FGM5HEES4NKVCBCR';
-		$decision_engine_base_aa = 'WUJQDBZTZXMJFPFUXCVXUBD4MXFQRMZI';
-		$governance_base_aa = 'L7GGVULVIY6AAMJ42X62WIFHH6ARGVHC';
+		$decision_engine_base_aa = 'SB4M44HGXBZXLLO5YAROB3KEFYQURHFO';
+		$governance_base_aa = 'GGKIBHUBLOKZ2HRAY7QYGAC7RNDPJL4B';
 
 		$aa2aa_bytes = 2000;
 		$de_bytes = 3000;
@@ -190,9 +188,6 @@
 		// curve
 		if (!exists(params.m) OR !exists(params.n))
 			bounce("curve not defined");
-
-		// dilution
-		$allow_grants = params.allow_grants;
 
 		// fee and capacitor
 		$moved_capacity_share = var['moved_capacity_share'] OTHERWISE params.moved_capacity_share OTHERWISE 0.1; // how much is moved each time
@@ -350,7 +345,6 @@
 								var['rate_update_ts'] = timestamp;
 								var['growth_factor'] = 1;
 								var['interest_rate'] = $get_initial_interest_rate();
-								var['dilution_factor'] = 1;
 							}
 						}`
 					}
@@ -409,35 +403,6 @@
 							}
 							else
 								var[$name] = trigger.data.value;
-						}`
-					}
-				]
-			},
-
-			{ // accept a passed proposal from the governance AA
-				if: `{ $ready AND trigger.address == $governance_aa AND $allow_grants AND trigger.data.grant AND trigger.data.recipient AND trigger.data.amount }`,
-				init: `{
-					$name = trigger.data.name;
-				}`,
-				messages: [
-					{
-						app: 'payment',
-						payload: {
-							asset: '{$asset1}',
-							outputs: [
-								{address: '{trigger.data.recipient}', amount: '{trigger.data.amount}'},
-							]
-						}
-					},
-					{
-						app: 'state',
-						state: `{
-							$supply2 = var['supply2'];
-							$old_supply1 = var['supply1'];
-							$new_supply1 = $old_supply1 + trigger.data.amount;
-						//	var['dilution_factor'] *= ($old_supply1/$new_supply1)^$m;
-							var['dilution_factor'] *= $get_reserve($old_supply1, $supply2) / $get_reserve($new_supply1, $supply2);
-							var['supply1'] += trigger.data.amount;
 						}`
 					}
 				]

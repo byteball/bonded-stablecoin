@@ -7,14 +7,12 @@ const { Network } = Testkit({
 })
 
 const network_fee = 4000
-const aa2aa_fee = 2000
-const de_fee = 3000
 
 function round(n, precision) {
 	return Math.round(n * 10 ** precision) / 10 ** precision;
 }
 
-describe('Governance change decision engine', function () {
+describe('Governance proposal', function () {
 	this.timeout(120 * 1000)
 
 	before(async () => {
@@ -25,12 +23,12 @@ describe('Governance change decision engine', function () {
 			.with.agent({ bsf: path.join(__dirname, '../decision-engine/bonded-stablecoin-factory.oscript') })
 			.with.agent({ fund: path.join(__dirname, '../decision-engine/stability-fund.oscript') })
 			.with.agent({ de: path.join(__dirname, '../decision-engine/decision-engine.oscript') })
-			.with.agent({ noopde: path.join(__dirname, '../decision-engine/noop-de.oscript') })
 			.with.agent({ governance: path.join(__dirname, '../decision-engine/governance.oscript') })
 			.with.agent({ deposits: path.join(__dirname, '../deposits.oscript') })
 			.with.wallet({ oracle: 1e9 })
 			.with.wallet({ alice: 10000e9 })
 			.with.wallet({ bob: 1000e9 })
+			.with.wallet({ charlie: 1000e9 })
 			.with.explorer()
 			.run()
 		console.log('--- agents\n', this.network.agent)
@@ -41,6 +39,8 @@ describe('Governance change decision engine', function () {
 		this.aliceAddress = await this.alice.getAddress()
 		this.bob = this.network.wallet.bob
 		this.bobAddress = await this.bob.getAddress()
+		this.charlie = this.network.wallet.charlie
+		this.charlieAddress = await this.charlie.getAddress()
 	//	this.explorer = await this.network.newObyteExplorer().ready()
 
 		const balance = await this.bob.getBalance()
@@ -64,7 +64,7 @@ describe('Governance change decision engine', function () {
 
 		const { unitObj } = await this.oracle.getUnitInfo({ unit: unit })
 		const dfMessage = unitObj.messages.find(m => m.app === 'data_feed')
-		expect(dfMessage.payload.GBYTE_USD).to.be.equal(20)
+		expect(dfMessage.payload.GBYTE_USD).to.be.equal(price)
 		await this.network.witnessUntilStable(unit)
 
 		this.price = price
@@ -75,8 +75,8 @@ describe('Governance change decision engine', function () {
 		const { error: tf_error } = await this.network.timefreeze()
 		expect(tf_error).to.be.null
 
-		const ts = Math.floor(Date.now() / 1000)
-		this.fee_multiplier = 5
+		this.fee_multiplier = 2
+		this.interest_rate = 0.1
 		const { unit, error } = await this.bob.triggerAaWithData({
 			toAddress: this.network.agent.bsf,
 			amount: 15000,
@@ -87,11 +87,12 @@ describe('Governance change decision engine', function () {
 				decimals2: 2,
 				m: 2,
 				n: 2,
+				interest_rate: this.interest_rate,
 				fee_multiplier: this.fee_multiplier,
-				interest_rate: 0,
 				allow_grants: true,
 				oracle1: this.oracleAddress,
 				feed_name1: 'GBYTE_USD',
+				regular_challenging_period: 5*24*3600,
 			},
 		})
 		console.log(unit, error)
@@ -129,13 +130,15 @@ describe('Governance change decision engine', function () {
 		expect(curve_vars['asset1']).to.be.equal(this.asset1)
 		expect(curve_vars['asset2']).to.be.equal(this.asset2)
 		expect(curve_vars['governance_aa']).to.be.equal(this.governance_aa)
-		expect(curve_vars['fund_aa']).to.be.equal(this.fund_aa)
 		expect(curve_vars['growth_factor']).to.be.equal(1)
 		expect(curve_vars['dilution_factor']).to.be.undefined
-		expect(curve_vars['interest_rate']).to.be.equal(0)
-		expect(parseInt(curve_vars['rate_update_ts'])).to.be.gte(ts)
+		expect(curve_vars['interest_rate']).to.be.equal(0.1)
+
+		const { unitObj } = await this.bob.getUnitInfo({ unit: response.response_unit })
+		expect(curve_vars['rate_update_ts']).to.be.equal(unitObj.timestamp)
 
 		this.decision_engine_aa = curve_vars['decision_engine_aa'];
+		this.ts = unitObj.timestamp
 
 		this.getReserve = (s1, s2) => Math.ceil(1e9*(s1/1e9)**2 * (s2/1e2)**2)
 		this.getP1 = (s1, s2) => 2 * (s1/1e9) * (s2/1e2)**2
@@ -192,9 +195,7 @@ describe('Governance change decision engine', function () {
 		this.slow_capacity = 0
 		this.fast_capacity = 0
 		this.distance = 0
-
 	})
-
 
 
 	it('Alice buys shares, the DE buys tokens', async () => {
@@ -295,13 +296,76 @@ describe('Governance change decision engine', function () {
 	})
 
 
-	it('Half a year later, Alice votes to change the DE', async () => {
+	it('Half a year later, Bob posts a grant request', async () => {
 		const { time_error } = await this.network.timetravel({shift: '180d'})
 		expect(time_error).to.be.undefined
 
-		const shares = Math.floor(this.shares_supply / 4)
-		const name = 'decision_engine_aa'
-		const value = this.network.agent.noopde
+		this.grant_amount = this.shares_supply * 0.1
+		const pledge = "I'm going to do this and that. For my work, I want to be paid " + this.grant_amount + " shares"
+
+		const { unit, error } = await this.bob.sendMulti({
+			messages: [{
+				app: 'text',
+				payload: pledge
+			}],
+		})
+
+		expect(error).to.be.null
+		expect(unit).to.be.validUnit
+
+		const { unitObj } = await this.bob.getUnitInfo({ unit: unit })
+		const textMessage = unitObj.messages.find(m => m.app === 'text')
+		expect(textMessage.payload).to.be.equal(pledge)
+		await this.network.witnessUntilStable(unit)
+
+		this.grant_request_unit = unit
+	})
+	
+	it('Alice creates a proposal', async () => {
+		this.num = 1
+		const expiry = '2030-07-01'
+
+		const { unit, error } = await this.alice.triggerAaWithData({
+			toAddress: this.governance_aa,
+			amount: 1e4,
+			spend_unconfirmed: 'all',
+			data: {
+				add_proposal: 1,
+				type: 'grant',
+				recipient: this.bobAddress,
+				amount: this.grant_amount,
+				expiry: expiry,
+				unit: this.grant_request_unit
+			}
+		})
+
+		expect(error).to.be.null
+		expect(unit).to.be.validUnit
+
+		const { response } = await this.network.getAaResponseToUnit(unit)
+	//	await this.network.witnessUntilStable(response.response_unit)
+
+		expect(response.response.error).to.be.undefined
+		expect(response.bounced).to.be.false
+		expect(response.response_unit).to.be.null
+
+		const { vars } = await this.alice.readAAStateVars(this.governance_aa)
+		console.log(vars)
+		expect(vars['count_proposals']).to.be.equal(this.num)
+		expect(vars['proposal_' + this.num + '_recipient']).to.be.equal(this.bobAddress)
+		expect(vars['proposal_' + this.num + '_amount']).to.be.equal(this.grant_amount)
+		expect(vars['proposal_' + this.num + '_unit']).to.be.equal(this.grant_request_unit)
+		expect(vars['proposal_' + this.num + '_expiry']).to.be.equal(expiry)
+
+		const { unitObj } = await this.alice.getUnitInfo({ unit })
+	//	console.log(JSON.stringify(unitObj, null, '\t'))
+
+	})
+
+	it('Alice votes for the proposal', async () => {
+		const shares = Math.floor(this.shares_supply * 0.25)
+		const name = 'proposal'
+		const value = this.num
 
 		const { unit, error } = await this.alice.sendMulti({
 			asset: this.shares_asset,
@@ -338,16 +402,14 @@ describe('Governance change decision engine', function () {
 	//	console.log(JSON.stringify(unitObj, null, '\t'))
 		expect(vars['challenging_period_start_ts_' + name]).to.be.equal(unitObj.timestamp)
 
+		this.challenging_period_start_ts = unitObj.timestamp
 		this.name = name
 		this.value = value
-		this.shares = shares
+		this.alice_shares_locked = shares
 	})
 
 
-	it('Bob waits for 5 days and tries to commit too early for an important governance decision but unsuccessful', async () => {
-		const { time_error } = await this.network.timetravel({shift: '5d'})
-		expect(time_error).to.be.undefined
-
+	it('Bob tries to commit too early but unsuccessful', async () => {
 		const { unit, error } = await this.bob.triggerAaWithData({
 			toAddress: this.governance_aa,
 			amount: 1e4,
@@ -370,11 +432,90 @@ describe('Governance change decision engine', function () {
 
 	})
 
-
-	it('Bob waits for 25 days more and then commits successfully', async () => {
-		const { time_error } = await this.network.timetravel({shift: '25d'})
+	it('Bob waits for 5 days and fails again due to insufficient support', async () => {
+		const { time_error } = await this.network.timetravel({shift: '5d'})
 		expect(time_error).to.be.undefined
 
+		const { unit, error } = await this.bob.triggerAaWithData({
+			toAddress: this.governance_aa,
+			amount: 1e4,
+			spend_unconfirmed: 'all',
+			data: {
+				name: this.name,
+				commit: 1,
+			}
+		})
+
+		expect(error).to.be.null
+		expect(unit).to.be.validUnit
+
+		const { response } = await this.network.getAaResponseToUnit(unit)
+	//	await this.network.witnessUntilStable(response.response_unit)
+
+		expect(response.response.error).to.be.equal('not enough support for the proposal')
+		expect(response.bounced).to.be.true
+		expect(response.response_unit).to.be.null
+
+	})
+
+	it('Alice sends token1 to Charlie', async () => {
+		const { unit, error } = await this.alice.sendMulti({
+			asset: this.shares_asset,
+			amount: Math.round(this.shares_supply * 0.3),
+			to_address: this.charlieAddress,
+			spend_unconfirmed: 'all',
+		})
+
+		expect(error).to.be.null
+		expect(unit).to.be.validUnit
+
+		await this.network.witnessUntilStable(unit)
+	})
+
+	it('Charlie supports Alice and also votes for the proposal', async () => {
+		const shares = Math.floor(this.shares_supply * 0.3)
+		const name = 'proposal'
+		const value = this.num
+
+		const { unit, error } = await this.charlie.sendMulti({
+			asset: this.shares_asset,
+			base_outputs: [{ address: this.governance_aa, amount: 1e4 }],
+			asset_outputs: [{ address: this.governance_aa, amount: shares }],
+			spend_unconfirmed: 'all',
+			messages: [{
+				app: 'data',
+				payload: {
+					name: name,
+					value: value
+				}
+			}]
+		})
+
+		expect(error).to.be.null
+		expect(unit).to.be.validUnit
+
+		const { response } = await this.network.getAaResponseToUnit(unit)
+	//	await this.network.witnessUntilStable(response.response_unit)
+
+		expect(response.response.error).to.be.undefined
+		expect(response.bounced).to.be.false
+		expect(response.response_unit).to.be.null
+
+		const { vars } = await this.charlie.readAAStateVars(this.governance_aa)
+		console.log(vars)
+		expect(vars['support_' + name + '_' + value]).to.be.equal(Math.floor(0.55 * this.shares_supply))
+		expect(vars['support_' + name + '_' + value + '_' + this.charlieAddress]).to.be.equal(shares)
+		expect(vars['leader_' + name]).to.be.equal(this.num)
+		expect(vars['balance_' + this.charlieAddress]).to.be.equal(shares)
+
+		const { unitObj } = await this.charlie.getUnitInfo({ unit })
+	//	console.log(JSON.stringify(unitObj, null, '\t'))
+		expect(vars['challenging_period_start_ts_' + name]).to.be.equal(this.challenging_period_start_ts)
+
+	})
+
+
+	it('Bob tries again and commits successfully', async () => {
 		const { unit, error } = await this.bob.triggerAaWithData({
 			toAddress: this.governance_aa,
 			amount: 1e4,
@@ -397,20 +538,48 @@ describe('Governance change decision engine', function () {
 
 		const { vars } = await this.bob.readAAStateVars(this.governance_aa)
 		console.log(vars)
-		expect(vars['support_' + this.name + '_' + this.value]).to.be.equal(this.shares)
-		expect(vars['support_' + this.name + '_' + this.value + '_' + this.aliceAddress]).to.be.equal(this.shares)
+		expect(vars['support_' + this.name + '_' + this.value]).to.be.equal(Math.floor(this.shares_supply * 0.55))
+		expect(vars['support_' + this.name + '_' + this.value + '_' + this.aliceAddress]).to.be.equal(Math.floor(this.shares_supply * 0.25))
+		expect(vars['support_' + this.name + '_' + this.value + '_' + this.charlieAddress]).to.be.equal(Math.floor(this.shares_supply * 0.3))
 		expect(vars['leader_' + this.name]).to.be.equal(this.value)
-		expect(vars[this.name]).to.be.equal(this.value)
-		expect(vars['balance_' + this.aliceAddress]).to.be.equal(this.shares)
+		expect(vars[this.name]).to.be.undefined
+		expect(vars['proposal_' + this.num + '_approved']).to.be.equal(1)
+		expect(vars['balance_' + this.aliceAddress]).to.be.equal(Math.floor(this.shares_supply * 0.25))
+		expect(vars['balance_' + this.charlieAddress]).to.be.equal(Math.floor(this.shares_supply * 0.3))
 
-		const { unitObj } = await this.bob.getUnitInfo({ unit: response.response_unit })
+		this.initial_shares_supply = this.shares_supply
+		this.shares_supply += this.grant_amount
 
 		const { vars: cvars } = await this.bob.readAAStateVars(this.curve_aa)
 		console.log(cvars)
-		expect(cvars[this.name]).to.be.equal(this.value)
-		expect(cvars['decision_engine_aa']).to.be.equal(this.network.agent.noopde)
+		expect(cvars[this.name]).to.be.undefined
+		expect(cvars['rate_update_ts']).to.be.equal(this.ts)
+		expect(cvars['growth_factor']).to.be.equal(1)
+		expect(cvars['supply1']).to.be.equal(this.supply1)
+		expect(cvars['dilution_factor']).to.be.undefined
 
-		this.decision_engine_aa = this.network.agent.noopde
+		const { vars: fvars } = await this.bob.readAAStateVars(this.fund_aa)
+		console.log(fvars)
+		expect(fvars['shares_supply']).to.be.eq(this.shares_supply)
+
+		// DE to fund
+		const { response: response2 } = await this.network.getAaResponseToUnit(response.response_unit)
+		expect(response2.response_unit).to.be.validUnit
+
+		// fund to bob
+		const { response: response3 } = await this.network.getAaResponseToUnit(response2.response_unit)
+		expect(response3.response_unit).to.be.validUnit
+		const { unitObj } = await this.bob.getUnitInfo({ unit: response3.response_unit })
+		expect(Utils.getExternalPayments(unitObj)).to.deep.equalInAnyOrder([
+			{
+				asset: this.shares_asset,
+				address: this.bobAddress,
+				amount: this.grant_amount,
+			},
+		])
+
+		const balances = await this.bob.getOutputsBalanceOf(this.bobAddress);
+		expect(balances[this.shares_asset].total).to.be.eq(this.grant_amount)
 	})
 
 
@@ -430,7 +599,7 @@ describe('Governance change decision engine', function () {
 		const { response } = await this.network.getAaResponseToUnit(unit)
 	//	await this.network.witnessUntilStable(response.response_unit)
 
-		expect(response.response.error).to.be.equal("support for decision_engine_aa not removed yet")
+		expect(response.response.error).to.be.equal("support for proposal not removed yet")
 		expect(response.bounced).to.be.true
 		expect(response.response_unit).to.be.null
 
@@ -484,11 +653,12 @@ describe('Governance change decision engine', function () {
 
 		const { vars } = await this.alice.readAAStateVars(this.governance_aa)
 		console.log(vars)
-		expect(vars['support_' + this.name + '_' + this.value]).to.be.equal(0)
+		expect(vars['support_' + this.name + '_' + this.value]).to.be.equal(Math.floor(0.3 * this.initial_shares_supply)) // charlie
 		expect(vars['support_' + this.name + '_' + this.value + '_' + this.aliceAddress]).to.be.undefined
 		expect(vars['leader_' + this.name]).to.be.equal(this.value)
-		expect(vars['balance_' + this.aliceAddress]).to.be.equal(this.shares)
-		expect(vars[this.name]).to.be.equal(this.value)
+		expect(vars['balance_' + this.aliceAddress]).to.be.equal(this.alice_shares_locked)
+		expect(vars[this.name]).to.be.undefined
+		expect(vars['proposal_' + this.num + '_approved']).to.be.equal(1)
 
 	})
 
@@ -514,128 +684,79 @@ describe('Governance change decision engine', function () {
 
 		const { vars } = await this.alice.readAAStateVars(this.governance_aa)
 		console.log(vars)
-		expect(vars['support_' + this.name + '_' + this.value]).to.be.equal(0)
+		expect(vars['support_' + this.name + '_' + this.value]).to.be.equal(Math.floor(0.3 * this.initial_shares_supply)) // charlie
 		expect(vars['support_' + this.name + '_' + this.value + '_' + this.aliceAddress]).to.be.undefined
 		expect(vars['leader_' + this.name]).to.be.equal(this.value)
 		expect(vars['balance_' + this.aliceAddress]).to.be.equal(0)
-		expect(vars[this.name]).to.be.equal(this.value)
+		expect(vars[this.name]).to.be.undefined
+		expect(vars['proposal_' + this.num + '_approved']).to.be.equal(1)
 
 		const { unitObj } = await this.alice.getUnitInfo({ unit: response.response_unit })
 		expect(Utils.getExternalPayments(unitObj)).to.deep.equalInAnyOrder([{
 			address: this.aliceAddress,
 			asset: this.shares_asset,
-			amount: this.shares,
+			amount: this.alice_shares_locked,
 		}])
 
 	})
 
-	it('1 year later, Alice buys more of the tokens2, the new DE does nothing', async () => {
-		const { time_error } = await this.network.timetravel({shift: '360d'})
-		expect(time_error).to.be.undefined
 
-		const initial_p2 = round(this.p2, 16)
-		const tokens1 = 0
-		const tokens2 = 10e2
-		const stable_tokens = tokens2
-		const { amount, fee, fee_percent } = this.buy(tokens1, tokens2)
+	it("Charlie buys shares in the fund and pays a new (lower) share price", async () => {
+		const balances = await this.charlie.getOutputsBalanceOf(this.fund_aa);
+		expect(balances[this.asset1].total).to.be.eq(this.supply1)
+		const bytes_balance = balances.base.total
+		const p1 = this.getP1(this.supply1, this.supply2)
+		const share_price_in_gb = (bytes_balance / 1e9 + p1 * this.supply1 / 1e9) / this.shares_supply
+		const share_price_in_bytes = share_price_in_gb * 1e9
 
-		const { unit, error } = await this.alice.triggerAaWithData({
-			toAddress: this.curve_aa,
-			amount: amount + fee + network_fee + aa2aa_fee,
-			data: {
-				tokens2: tokens2,
-				tokens2_to: this.deposit_aa,
-			},
+		const amount = 1e9
+		const shares = Math.floor(amount / share_price_in_bytes)
+		
+		const { unit, error } = await this.charlie.sendBytes({
+			toAddress: this.decision_engine_aa,
+			amount: amount + 1e4,
 		})
 
 		expect(error).to.be.null
 		expect(unit).to.be.validUnit
 
 		const { response } = await this.network.getAaResponseToUnit(unit)
-	//	await this.network.witnessUntilStable(response.response_unit)
+		await this.network.witnessUntilStable(response.response_unit)
 
 		expect(response.response.error).to.be.undefined
 		expect(response.bounced).to.be.false
 		expect(response.response_unit).to.be.validUnit
-		expect(response.response.responseVars['fee%']).to.be.equal(fee_percent+'%')
 
-		const { vars } = await this.alice.readAAStateVars(this.curve_aa)
-		console.log(vars)
-		expect(vars['supply1']).to.be.equal(this.supply1)
-		expect(vars['supply2']).to.be.equal(this.supply2)
-		expect(vars['reserve']).to.be.equal(this.reserve)
-		expect(vars['slow_capacity']).to.be.equal(this.slow_capacity)
-		expect(vars['fast_capacity']).to.be.equal(this.fast_capacity)
-
-		const { unitObj } = await this.alice.getUnitInfo({ unit: response.response_unit })
-		expect(vars['lost_peg_ts']).to.be.equal(unitObj.timestamp)
-	//	console.log(JSON.stringify(unitObj, null, '\t'))
+		// DE to fund
+		const { unitObj } = await this.charlie.getUnitInfo({ unit: response.response_unit })
 		expect(Utils.getExternalPayments(unitObj)).to.deep.equalInAnyOrder([
 			{
-				address: this.deposit_aa,
-				asset: this.asset2,
-				amount: tokens2,
-			},
-			{
-				address: this.decision_engine_aa,
-				amount: de_fee,
-			},
-			{
-				address: this.deposit_aa,
-				amount: aa2aa_fee,
+				address: this.fund_aa,
+				amount: amount + 5000,
 			},
 		])
 		const data = unitObj.messages.find(m => m.app === 'data').payload
-		data.tx.res.fee_percent = round(data.tx.res.fee_percent, 4)
-		expect(data).to.be.deep.eq({
-			tx: {
-				tokens2,
-				res: {
-					reserve_needed: amount + fee,
-					reserve_delta: amount,
-					fee,
-					regular_fee: fee,
-					reward: 0,
-					initial_p2,
-					p2: this.p2,
-					target_p2: this.target_p2,
-					new_distance: round(this.distance, 15),
-					turnover: amount,
-					fee_percent,
-					slow_capacity_share: 0.5,
-				},
+		expect(data).to.be.deep.equalInAnyOrder({
+			payments: [{
+				asset: this.shares_asset, address: this.charlieAddress, amount: shares
+			}],
+		})
+
+		// fund to charlie
+		const { response: response2 } = await this.network.getAaResponseToUnit(response.response_unit)
+		const { unitObj: unitObj2 } = await this.charlie.getUnitInfo({ unit: response2.response_unit })
+		expect(Utils.getExternalPayments(unitObj2)).to.deep.equalInAnyOrder([
+			{
+				asset: this.shares_asset,
+				address: this.charlieAddress,
+				amount: shares,
 			},
-			to: this.aliceAddress,
-		})
-		
-		// DE does nothing
-		const { response: response2 } = await this.network.getAaResponseToUnitByAA(response.response_unit, this.decision_engine_aa)
-		expect(response2.response_unit).to.be.null
-		expect(response2.response.responseVars.message).to.be.equal("Did nothing")
+		])
+		expect(unitObj2.messages.find(m => m.app === 'data')).to.be.undefined
 
-		// deposit AA opens a deposit and sends stablecoins to Alice
-		const id = response.response_unit
-		const { response: response3 } = await this.network.getAaResponseToUnitByAA(response.response_unit, this.deposit_aa)
-		expect(response3.response_unit).to.be.validUnit
-		expect(response3.response.responseVars.id).to.be.equal(id)
-
-		const { vars: dvars } = await this.alice.readAAStateVars(this.deposit_aa)
-		console.log(dvars)
-		expect(dvars['supply']).to.be.equal(stable_tokens)
-
-		const { unitObj: unitObj3 } = await this.alice.getUnitInfo({ unit: response3.response_unit })
-	//	console.log(JSON.stringify(unitObj, null, '\t'))
-		expect(Utils.getExternalPayments(unitObj3)).to.deep.equalInAnyOrder([{
-			address: this.aliceAddress,
-			asset: this.asset_stable,
-			amount: stable_tokens,
-		}])
-		expect(dvars['deposit_' + id]).to.deep.equalInAnyOrder({
-			amount: tokens2,
-			stable_amount: stable_tokens,
-			owner: this.aliceAddress,
-			ts: unitObj.timestamp,
-		})
+		this.shares_supply += shares
+		const { vars: fund_vars } = await this.charlie.readAAStateVars(this.fund_aa)
+		expect(fund_vars['shares_supply']).to.be.eq(this.shares_supply)
 
 	})
 

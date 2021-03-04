@@ -22,22 +22,21 @@
 		$network_fee = ($reserve_asset == 'base') ? 4000 : 0; // charged by the curve
 
 		$get_leverage = () => $curve_params.leverage OTHERWISE 0;
-		$dilution_factor = var[$curve_aa]['dilution_factor'];
 
 		$get_reserve = ($s1, $s2) => {
-			$r = $dilution_factor * $s1^$curve_params.m * $s2^$curve_params.n;
+			$r = $s1^$curve_params.m * $s2^$curve_params.n;
 			$r
 		};
 
 		$get_p2 = ($s1, $s2) => {
-			$p2 = $dilution_factor * $s1^$curve_params.m * $curve_params.n * (/*is_integer($curve_params.n*2) ? sqrt($s2^(($curve_params.n-1)*2)) :*/ $s2^($curve_params.n-1) ); // derivative
+			$p2 = $s1^$curve_params.m * $curve_params.n * $s2^($curve_params.n-1); // derivative
 			$p2
 		};
 
 		$get_p1 = () => {
 			$s1 = var[$curve_aa]['supply1']/10^$curve_params.decimals1;
 			$s2 = var[$curve_aa]['supply2']/10^$curve_params.decimals2;
-			$p1_in_full_units = $dilution_factor * $curve_params.m * $s1^($curve_params.m-1) * $s2^$curve_params.n; // derivative
+			$p1_in_full_units = $curve_params.m * $s1^($curve_params.m-1) * $s2^$curve_params.n; // derivative
 			$p1_in_smallest_units = $p1_in_full_units * 10^($curve_params.reserve_asset_decimals - $curve_params.decimals1);
 			$p1_in_smallest_units
 		};
@@ -148,6 +147,32 @@
 	messages: {
 		cases: [
 
+			// accept a passed proposal from the governance AA
+			{
+				if: `{ $shares_asset AND $curve_params.allow_grants AND trigger.data.grant AND trigger.data.recipient AND trigger.data.amount AND trigger.address == var[$curve_aa]['governance_aa'] }`,
+				messages: [
+					{
+						app: 'payment',
+						payload: {
+							asset: 'base',
+							outputs: [
+								{address: '{$fund_aa}', amount: "{trigger.output[[asset=base]] - 1000}"},
+							]
+						}
+					},
+					{
+						app: 'data',
+						payload: {
+							payments: [{
+								asset: `{$shares_asset}`,
+								address: `{trigger.data.recipient}`,
+								amount: `{trigger.data.amount}`,
+							}]
+						}
+					}
+				]
+			},
+
 			// fix the price
 			{
 				if: `{ (trigger.data.tx AND trigger.address == $curve_aa) OR trigger.data.act }`,
@@ -235,7 +260,7 @@
 
 			// buy shares from the AA
 			{
-				if: `{ $shares_asset AND (trigger.output[[asset=$reserve_asset]] > 0) AND trigger.output[[asset=$shares_asset]] == 0 }`,
+				if: `{ $shares_asset AND trigger.output[[asset=$reserve_asset]] > 0 AND trigger.output[[asset=$shares_asset]] == 0 }`,
 				init: `{
 					if ($redemption)
 						bounce("BUG: redeeming");

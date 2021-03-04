@@ -74,7 +74,7 @@
 						if (var['proposal_' || $leader || '_approved'])
 							bounce("the proposal has already been approved");
 						$support = var['support_' || $name || '_' || $leader];
-						if ($support < var[$curve_aa]['supply1'] * $proposal_min_support)
+						if ($support < var[$fund_aa]['shares_supply'] * $proposal_min_support)
 							bounce("not enough support for the proposal");
 						$proposal_amount = var['proposal_' || $leader || '_amount'];
 						if ($proposal_amount == 0) // it cannot be committed and will never become approved
@@ -88,7 +88,7 @@
 						payload: {
 							asset: 'base',
 							outputs: [
-								{address: "{$curve_aa}", amount: 5000}
+								{address: "{$name == 'proposal' ? var[$curve_aa]['decision_engine_aa'] : $curve_aa}", amount: 5000}
 							]
 						}
 					},
@@ -233,7 +233,7 @@
 			},
 
 			{ // add a new proposal for paying a grant to someone
-				if: `{ trigger.data.add_proposal AND trigger.data.type }`,
+				if: `{ trigger.data.add_proposal AND trigger.data.type AND definition[$curve_aa][1].params.allow_grants }`,
 				init: `{
 					if (trigger.data.type != 'grant')
 						bounce("unrecognized proposal type");

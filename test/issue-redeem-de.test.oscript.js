@@ -108,7 +108,7 @@ describe('issue redeem', function () {
 		expect(curve_vars['governance_aa']).to.be.equal(this.governance_aa)
 		expect(curve_vars['fund_aa']).to.be.equal(this.fund_aa)
 		expect(curve_vars['growth_factor']).to.be.equal(1)
-		expect(curve_vars['dilution_factor']).to.be.equal(1)
+		expect(curve_vars['dilution_factor']).to.be.undefined
 		expect(curve_vars['interest_rate']).to.be.equal(0)
 		expect(parseInt(curve_vars['rate_update_ts'])).to.be.gte(ts)
 
