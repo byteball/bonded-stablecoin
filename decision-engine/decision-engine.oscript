@@ -72,14 +72,21 @@
 		$get_oracle_price = () => {
 			$oracles = $get_oracles();
 			$oracle_price = reduce($oracles, 3, ($price, $oracle_info) => {
-				$df = data_feed[[oracles=$oracle_info.oracle, feed_name=$oracle_info.feed_name]];
+				if (!exists($price))
+					return false;
+				$df = data_feed[[oracles=$oracle_info.oracle, feed_name=$oracle_info.feed_name, ifnone=false]];
+				if (!exists($df))
+					return false;
 				($oracle_info.op == '*') ? $price * $df : $price / $df
 			}, 1);
 			$oracle_price
 		};
 
 		$get_target_p2 = () => {
-			$target_p2 = $get_oracle_price()^($get_leverage() - 1) * $get_growth_factor();
+			$oracle_price = $get_oracle_price();
+			if (!exists($oracle_price))
+				return false;
+			$target_p2 = $oracle_price^($get_leverage() - 1) * $get_growth_factor();
 			$target_p2
 		};
 
@@ -98,7 +105,11 @@
 			$n = $curve_params.n;
 
 			$data = {};
+			
 			$data.target_p2 = $get_target_p2();
+			if (!exists($data.target_p2))
+				return $data;
+			
 			$s2 = $supply2/10^$decimals2;
 
 			// try full fixing first
@@ -109,11 +120,11 @@
 
 			$reserve_balance = balance[$fund_aa][$reserve_asset];
 			if ($data.reserve_delta > $reserve_balance){ // partial fixing
-				$data.reserve_delta = $reserve_balance;
-				$new_reserve = $reserve + $reserve_balance;
+				$data.reserve_delta = $reserve_balance - $network_fee - ($reserve_asset == 'base' ? 3000 : 0);
+				$new_reserve = $reserve + $data.reserve_delta;
 				$new_r = $new_reserve/10^$reserve_asset_decimals;
 				$data.new_s1 = ($new_r/$s2^$n)^(1/$m);
-				$data.tokens1_delta = round($data.new_s1 * 10^$decimals1) - $supply1;
+				$data.tokens1_delta = floor($data.new_s1 * 10^$decimals1) - $supply1;
 				if ($data.tokens1_delta < 0)
 					bounce("partial tokens1_delta < 0");
 				$data.partial = true;
@@ -194,11 +205,12 @@
 					}
 
 					$data = $get_exchange_data();
-					$below_peg = ($data.current_p2 < $data.target_p2);
+					$below_peg = (exists($data.target_p2) AND $data.current_p2 < $data.target_p2);
 					$large_below_peg = $below_peg AND ($data.target_p2 - $data.current_p2)/$data.target_p2 >= $below_peg_threshold;
 					$tokens1 = $data.tokens1_delta;
 					if (
-						$below_peg AND $below_peg_timeout AND (!$below_peg_ts OR timestamp < $below_peg_ts + $below_peg_timeout)
+						!exists($data.target_p2)
+						OR $below_peg AND $below_peg_timeout AND (!$below_peg_ts OR timestamp < $below_peg_ts + $below_peg_timeout)
 						OR abs($tokens1) <= 1 // already on-peg
 						OR abs($data.reserve_delta) < $min_reserve_delta // reserve delta would be too small
 					){
@@ -281,7 +293,7 @@
 					if (!var[$curve_aa]['supply1'] AND !var[$curve_aa]['supply2'] AND !var[$curve_aa]['reserve']){
 						$m = $curve_params.m;
 						$n = $curve_params.n;
-						$target_p2 = $get_target_p2();
+						$target_p2 = $get_target_p2() OTHERWISE trigger.data.p2;
 						$r = ($received_reserve_amount - $network_fee) / 10^$curve_params.reserve_asset_decimals;
 						$s2 = $n * $r / $target_p2;
 						$s1 = ($r / $s2^$n)^(1/$m);
