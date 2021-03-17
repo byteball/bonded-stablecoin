@@ -21,13 +21,12 @@ describe('issue redeem', function () {
 	before(async () => {
 		this.network = await Network.create()
 			.with.numberOfWitnesses(1)
-			.with.agent({ bank: path.join(__dirname, '../node_modules/bank-aa/bank.oscript') })
 			.with.agent({ bs: path.join(__dirname, '../decision-engine/bonded-stablecoin.oscript') })
 			.with.agent({ bsf: path.join(__dirname, '../decision-engine/bonded-stablecoin-factory.oscript') })
 			.with.agent({ fund: path.join(__dirname, '../decision-engine/stability-fund.oscript') })
 			.with.agent({ de: path.join(__dirname, '../decision-engine/decision-engine.oscript') })
 			.with.agent({ governance: path.join(__dirname, '../decision-engine/governance.oscript') })
-			.with.agent({ deposits: path.join(__dirname, '../deposits.oscript') })
+			.with.agent({ stable: path.join(__dirname, '../decision-engine/stable.oscript') })
 			.with.wallet({ oracle: 1e9 })
 			.with.wallet({ alice: 10000e9 })
 			.with.wallet({ bob: 1000e9 })
@@ -97,7 +96,7 @@ describe('issue redeem', function () {
 		this.asset2 = vars['asset_' + this.curve_aa + '_2'];
 		this.asset_stable = vars['asset_' + this.curve_aa + '_stable'];
 		this.shares_asset = vars['asset_' + this.curve_aa + '_fund'];
-		this.deposit_aa = vars['deposit_aa_' + this.curve_aa];
+		this.stable_aa = vars['stable_aa_' + this.curve_aa];
 		this.governance_aa = vars['governance_aa_' + this.curve_aa];
 		this.fund_aa = vars['fund_aa_' + this.curve_aa];
 

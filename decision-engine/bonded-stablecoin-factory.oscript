@@ -1,8 +1,8 @@
 {
 	doc_url: "https://ostable.org/bonded-stablecoin-de-factory.json",
 	init: `{
-		$stablecoin_base_aa = 'O3YILNM5LF77Y6H7SPJJTEPQWTQNPMXF';
-		$stablecoin_deposit_base_aa = 'GEZGVY4T3LK6N4NJAKNHNQIVAI5OYHPC';
+		$curve_base_aa = 'O3YILNM5LF77Y6H7SPJJTEPQWTQNPMXF';
+		$stable_base_aa = 'YXPLX6Q3HBBSH2K5HLYM45W7P7HFSEIN';
 	}`,
 	messages: {
 		cases: [
@@ -11,22 +11,22 @@
 			{
 				if: `{trigger.data.asset1 AND var['curve_' || trigger.address]}`,
 				init: `{
-					$deposit_aa = [
+					$stable_aa = [
 						'autonomous agent',
 						{
-							base_aa: $stablecoin_deposit_base_aa,
+							base_aa: $stable_base_aa,
 							params: {
 								curve_aa: trigger.address
 							}
 						}
 					];
-					$deposit_aa_address = chash160($deposit_aa);
+					$stable_aa_address = chash160($stable_aa);
 				}`,
 				messages: [
 					{
 						app: 'definition',
 						payload: {
-							definition: `{$deposit_aa}`
+							definition: `{$stable_aa}`
 						}
 					},
 					{
@@ -34,7 +34,7 @@
 						payload: {
 							asset: 'base',
 							outputs: [
-								{ address: "{ $deposit_aa_address }", amount: 4000 }, // I'll get all this money back (minus fees)
+								{ address: "{ $stable_aa_address }", amount: 4000 }, // I'll get all this money back (minus fees)
 							]
 						}
 					},
@@ -51,7 +51,7 @@
 							$governance_aa_address = unit[trigger.unit].messages[[.app='definition']].payload.address;
 							var['asset_' || trigger.address || '_1'] = trigger.data.asset1;
 							var['asset_' || trigger.address || '_2'] = trigger.unit;
-							var['deposit_aa_' || trigger.address] = $deposit_aa_address;
+							var['stable_aa_' || trigger.address] = $stable_aa_address;
 							var['governance_aa_' || trigger.address] = $governance_aa_address;
 							var['fund_aa_' || trigger.address] = var[trigger.address]['fund_aa'];
 							var['asset_' || trigger.address || '_fund'] = var[var[trigger.address]['fund_aa']]['shares_asset'];
@@ -59,16 +59,16 @@
 							response['asset_2'] = trigger.unit;
 							response['shares_asset'] = var[var[trigger.address]['fund_aa']]['shares_asset'];
 							response['address'] = trigger.address;
-							response['deposit_aa'] = $deposit_aa_address;
+							response['stable_aa'] = $stable_aa_address;
 							response['governance_aa'] = $governance_aa_address;
 						}`
 					}
 				]
 			},
 
-			// accept a callback from a newly created deposit AA to record its newly defined asset
+			// accept a callback from a newly created stable AA to record its newly defined asset
 			{
-				if: `{trigger.data.write_stable_asset AND var['deposit_aa_' || trigger.data.curve_aa] == trigger.address}`,
+				if: `{trigger.data.write_stable_asset AND var['stable_aa_' || trigger.data.curve_aa] == trigger.address}`,
 				messages: [
 					{
 						app: 'state',
@@ -209,29 +209,10 @@
 						}
 					});
 
-					$deposit_params = ['min_deposit_term', 'challenging_period', 'challenge_immunity_period', 'reporter_share'];
-					foreach($deposit_params, 4, $p => {
-						if (exists(trigger.data.deposits[$p])) // nested list of params
-							$value = trigger.data.deposits[$p];
-						else if (exists(trigger.data['deposits.' || $p])) // flat list
-							$value = trigger.data['deposits.' || $p];
-						else
-							return; // use AA default if missing
-						if ($p == 'reporter_share'){
-							if (typeof($value) != 'number' OR $value < 0 OR $value > 1)
-								bounce("bad " || $p);
-						}
-						else {
-							if (!is_integer($value) OR $value < 0)
-								bounce("bad " || $p);
-						}
-						$params.deposits[$p] = $value;
-					});
-
 					$curve_aa = [
 						'autonomous agent',
 						{
-							base_aa: $stablecoin_base_aa,
+							base_aa: $curve_base_aa,
 							params: $params
 						}
 					];

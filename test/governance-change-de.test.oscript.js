@@ -20,14 +20,13 @@ describe('Governance change decision engine', function () {
 	before(async () => {
 		this.network = await Network.create()
 			.with.numberOfWitnesses(1)
-			.with.agent({ bank: path.join(__dirname, '../node_modules/bank-aa/bank.oscript') })
 			.with.agent({ bs: path.join(__dirname, '../decision-engine/bonded-stablecoin.oscript') })
 			.with.agent({ bsf: path.join(__dirname, '../decision-engine/bonded-stablecoin-factory.oscript') })
 			.with.agent({ fund: path.join(__dirname, '../decision-engine/stability-fund.oscript') })
 			.with.agent({ de: path.join(__dirname, '../decision-engine/decision-engine.oscript') })
 			.with.agent({ noopde: path.join(__dirname, '../decision-engine/noop-de.oscript') })
 			.with.agent({ governance: path.join(__dirname, '../decision-engine/governance.oscript') })
-			.with.agent({ deposits: path.join(__dirname, '../deposits.oscript') })
+			.with.agent({ stable: path.join(__dirname, '../decision-engine/stable.oscript') })
 			.with.wallet({ oracle: 1e9 })
 			.with.wallet({ alice: 10000e9 })
 			.with.wallet({ bob: 1000e9 })
@@ -77,6 +76,7 @@ describe('Governance change decision engine', function () {
 
 		const ts = Math.floor(Date.now() / 1000)
 		this.fee_multiplier = 5
+		this.interest_rate = 0.01
 		const { unit, error } = await this.bob.triggerAaWithData({
 			toAddress: this.network.agent.bsf,
 			amount: 15000,
@@ -88,7 +88,7 @@ describe('Governance change decision engine', function () {
 				m: 2,
 				n: 2,
 				fee_multiplier: this.fee_multiplier,
-				interest_rate: 0,
+				interest_rate: this.interest_rate,
 				allow_grants: true,
 				oracle1: this.oracleAddress,
 				feed_name1: 'GBYTE_USD',
@@ -120,7 +120,7 @@ describe('Governance change decision engine', function () {
 		this.asset2 = vars['asset_' + this.curve_aa + '_2'];
 		this.asset_stable = vars['asset_' + this.curve_aa + '_stable'];
 		this.shares_asset = vars['asset_' + this.curve_aa + '_fund'];
-		this.deposit_aa = vars['deposit_aa_' + this.curve_aa];
+		this.stable_aa = vars['stable_aa_' + this.curve_aa];
 		this.governance_aa = vars['governance_aa_' + this.curve_aa];
 		this.fund_aa = vars['fund_aa_' + this.curve_aa];
 
@@ -132,7 +132,7 @@ describe('Governance change decision engine', function () {
 		expect(curve_vars['fund_aa']).to.be.equal(this.fund_aa)
 		expect(curve_vars['growth_factor']).to.be.equal(1)
 		expect(curve_vars['dilution_factor']).to.be.undefined
-		expect(curve_vars['interest_rate']).to.be.equal(0)
+		expect(curve_vars['interest_rate']).to.be.equal(this.interest_rate)
 		expect(parseInt(curve_vars['rate_update_ts'])).to.be.gte(ts)
 
 		this.decision_engine_aa = curve_vars['decision_engine_aa'];
@@ -533,10 +533,13 @@ describe('Governance change decision engine', function () {
 		const { time_error } = await this.network.timetravel({shift: '360d'})
 		expect(time_error).to.be.undefined
 
+		const growth_factor = (1 + this.interest_rate)**((180+30+30+360)/360)
+		this.target_p2 = 1 / this.price * growth_factor
+		
 		const initial_p2 = round(this.p2, 16)
 		const tokens1 = 0
 		const tokens2 = 10e2
-		const stable_tokens = tokens2
+		const stable_tokens = Math.floor(tokens2 * growth_factor)
 		const { amount, fee, fee_percent } = this.buy(tokens1, tokens2)
 
 		const { unit, error } = await this.alice.triggerAaWithData({
@@ -544,7 +547,7 @@ describe('Governance change decision engine', function () {
 			amount: amount + fee + network_fee + aa2aa_fee,
 			data: {
 				tokens2: tokens2,
-				tokens2_to: this.deposit_aa,
+				tokens2_to: this.stable_aa,
 			},
 		})
 
@@ -572,7 +575,7 @@ describe('Governance change decision engine', function () {
 	//	console.log(JSON.stringify(unitObj, null, '\t'))
 		expect(Utils.getExternalPayments(unitObj)).to.deep.equalInAnyOrder([
 			{
-				address: this.deposit_aa,
+				address: this.stable_aa,
 				asset: this.asset2,
 				amount: tokens2,
 			},
@@ -581,12 +584,14 @@ describe('Governance change decision engine', function () {
 				amount: de_fee,
 			},
 			{
-				address: this.deposit_aa,
+				address: this.stable_aa,
 				amount: aa2aa_fee,
 			},
 		])
 		const data = unitObj.messages.find(m => m.app === 'data').payload
 		data.tx.res.fee_percent = round(data.tx.res.fee_percent, 4)
+		data.tx.res.new_distance = round(data.tx.res.new_distance, 14)
+		data.tx.res.target_p2 = round(data.tx.res.target_p2, 14)
 		expect(data).to.be.deep.eq({
 			tx: {
 				tokens2,
@@ -598,8 +603,8 @@ describe('Governance change decision engine', function () {
 					reward: 0,
 					initial_p2,
 					p2: this.p2,
-					target_p2: this.target_p2,
-					new_distance: round(this.distance, 15),
+					target_p2: round(this.target_p2, 14),
+					new_distance: round(this.distance, 14),
 					turnover: amount,
 					fee_percent,
 					slow_capacity_share: 0.5,
@@ -613,15 +618,13 @@ describe('Governance change decision engine', function () {
 		expect(response2.response_unit).to.be.null
 		expect(response2.response.responseVars.message).to.be.equal("Did nothing")
 
-		// deposit AA opens a deposit and sends stablecoins to Alice
-		const id = response.response_unit
-		const { response: response3 } = await this.network.getAaResponseToUnitByAA(response.response_unit, this.deposit_aa)
+		// stable AA converts to stablecoins and sends them to Alice
+		const { response: response3 } = await this.network.getAaResponseToUnitByAA(response.response_unit, this.stable_aa)
 		expect(response3.response_unit).to.be.validUnit
-		expect(response3.response.responseVars.id).to.be.equal(id)
 
-		const { vars: dvars } = await this.alice.readAAStateVars(this.deposit_aa)
-		console.log(dvars)
-		expect(dvars['supply']).to.be.equal(stable_tokens)
+		const { vars: svars } = await this.alice.readAAStateVars(this.stable_aa)
+		console.log(svars)
+		expect(svars['supply']).to.be.equal(stable_tokens)
 
 		const { unitObj: unitObj3 } = await this.alice.getUnitInfo({ unit: response3.response_unit })
 	//	console.log(JSON.stringify(unitObj, null, '\t'))
@@ -630,15 +633,49 @@ describe('Governance change decision engine', function () {
 			asset: this.asset_stable,
 			amount: stable_tokens,
 		}])
-		expect(dvars['deposit_' + id]).to.deep.equalInAnyOrder({
-			amount: tokens2,
-			stable_amount: stable_tokens,
-			owner: this.aliceAddress,
-			ts: unitObj.timestamp,
-		})
+
+		this.stable_tokens = stable_tokens
 
 	})
 
+	it('1 year later, Alice exchanges stable tokens back for token2', async () => {
+		const { time_error } = await this.network.timetravel({shift: '360d'})
+		expect(time_error).to.be.undefined
+
+		const tokens2 = Math.floor(this.stable_tokens / (1 + this.interest_rate)**((180+30+30+360+360)/360))
+
+		const { unit, error } = await this.alice.sendMulti({
+			asset: this.asset_stable,
+			base_outputs: [{ address: this.stable_aa, amount: 1e4 }],
+			asset_outputs: [{ address: this.stable_aa, amount: this.stable_tokens }],
+			spend_unconfirmed: 'all',
+		})
+
+		expect(error).to.be.null
+		expect(unit).to.be.validUnit
+
+		const { response } = await this.network.getAaResponseToUnit(unit)
+	//	await this.network.witnessUntilStable(response.response_unit)
+
+		expect(response.response.error).to.be.undefined
+		expect(response.bounced).to.be.false
+		expect(response.response_unit).to.be.validUnit
+
+		const { vars } = await this.alice.readAAStateVars(this.stable_aa)
+		console.log(vars)
+		expect(vars['supply']).to.be.equal(0)
+
+		const { unitObj } = await this.alice.getUnitInfo({ unit: response.response_unit })
+	//	console.log(JSON.stringify(unitObj, null, '\t'))
+		expect(Utils.getExternalPayments(unitObj)).to.deep.equalInAnyOrder([
+			{
+				address: this.aliceAddress,
+				asset: this.asset2,
+				amount: tokens2,
+			},
+		])
+
+	})
 
 	after(async () => {
 		// uncomment this line to pause test execution to get time for Obyte DAG explorer inspection

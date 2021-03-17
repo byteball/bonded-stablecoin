@@ -1,0 +1,145 @@
+{
+	doc_url: "https://ostable.org/bonded-stablecoin-stable.json",
+	getters: `{
+		
+		$get_curve_aa = () => params.curve_aa;
+
+		$get_growth_factor = () => {
+			$interest_rate = var[params.curve_aa]['interest_rate'];
+			$term = (timestamp - var[params.curve_aa]['rate_update_ts']) / (360 * 24 * 3600); // in years
+			$growth_factor = var[params.curve_aa]['growth_factor'] * (1 + $interest_rate)^$term;
+			$growth_factor
+		};
+
+	}`,
+	init: `{
+		$curve_aa = params.curve_aa;
+
+		// tokens
+		$asset = var['asset'];
+		$interest_asset = var[$curve_aa]['asset2'];
+
+		$growth_factor = $get_growth_factor();
+
+		if (exists(trigger.data.to) AND !is_valid_address(trigger.data.to))
+			bounce("bad to-address");
+	}`,
+	messages: {
+		cases: [
+
+			// define the stable asset
+			{
+				if: `{ trigger.data.define AND !$asset }`,
+				messages: [
+					{
+						app: 'asset',
+						payload: {
+							// without cap
+							is_private: false,
+							is_transferrable: true,
+							auto_destroy: false,
+							fixed_denominations: false,
+							issued_by_definer_only: true,
+							cosigned_by_definer: false,
+							spender_attested: false,
+						}
+					},
+					{ // call back to factory to record our newly defined asset
+						if: `{trigger.data.factory}`,
+						app: 'data',
+						payload: {
+							write_stable_asset: 1,
+							curve_aa: `{$curve_aa}`,
+						}
+					},
+					{
+						if: `{trigger.data.factory}`,
+						app: 'payment',
+						payload: {
+							asset: 'base',
+							outputs: [
+								{address: '{trigger.data.factory}'},
+							]
+						}
+					},
+					{
+						app: 'state',
+						state: `{
+							var['asset'] = response_unit;
+							response['asset'] = response_unit;
+						}`
+					}
+				]
+			},
+
+			// convert interest token to stable token
+			{
+				if: `{ $asset AND trigger.output[[asset=$interest_asset]] > 0 }`,
+				init: `{
+					$to = trigger.data.to OTHERWISE trigger.address;
+					$interest_amount = trigger.output[[asset=$interest_asset]];
+					$stable_amount = floor($interest_amount * $growth_factor);
+				}`,
+				messages: [
+					{
+						app: 'payment',
+						payload: {
+							asset: `{$asset}`,
+							outputs: [
+								{address: "{$to}", amount: "{ $stable_amount }"}
+							]
+						}
+					},
+					{
+						if: `{trigger.data.to AND is_aa(trigger.data.to)}`,
+						app: 'data',
+						payload: {
+							to: `{trigger.address}`
+						}
+					},
+					{
+						app: 'state',
+						state: `{
+							var['supply'] += $stable_amount;
+						}`
+					}
+				]
+			},
+
+			// convert stable token to interest token
+			{
+				if: `{ $asset AND trigger.output[[asset=$asset]] > 0 }`,
+				init: `{
+					$to = trigger.data.to OTHERWISE trigger.address;
+					$stable_amount = trigger.output[[asset=$asset]];
+					$interest_amount = floor($stable_amount / $growth_factor);
+				}`,
+				messages: [
+					{
+						app: 'payment',
+						payload: {
+							asset: `{$interest_asset}`,
+							outputs: [
+								{address: "{$to}", amount: "{ $interest_amount }"}
+							]
+						}
+					},
+					{
+						if: `{trigger.data.to AND is_aa(trigger.data.to)}`,
+						app: 'data',
+						payload: {
+							to: `{trigger.address}`
+						}
+					},
+					{
+						app: 'state',
+						state: `{
+							var['supply'] -= $stable_amount;
+						}`
+					}
+				]
+			},
+
+		]
+	}
+}
