@@ -202,6 +202,7 @@
 							address: $redemption.address,
 							amount: $redemption.reserve_amount - $res.reserve_needed - $network_fee
 						};
+						response['t1_redemption_proceeds'] = -$res.reserve_needed;
 					}
 
 					$data = $get_exchange_data();
@@ -379,6 +380,9 @@
 								reserve_amount: $reserve_amount,
 								t1_amount: $t1_amount,
 							};
+							response['message'] = "started redemption";
+							response['redeemed_reserve'] = $reserve_amount;
+							response['redeemed_t1'] = $t1_amount;
 						}`
 					}
 
