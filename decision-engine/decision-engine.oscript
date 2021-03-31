@@ -259,7 +259,7 @@
 								var['below_peg_ts'] = false;
 							if ($redemption)
 								var['redemption'] = false;
-							if ($bSending)
+							if ($bFixing)
 								response['message'] = $data.partial ? "DE partially fixed the peg" : "DE fixed the peg";
 							else
 								response['message'] = "DE does not interfere yet";
