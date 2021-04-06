@@ -121,13 +121,20 @@
 			$reserve_balance = balance[$fund_aa][$reserve_asset];
 			if ($data.reserve_delta > $reserve_balance){ // partial fixing
 				$data.reserve_delta = $reserve_balance - $network_fee - ($reserve_asset == 'base' ? 3000 : 0);
-				$new_reserve = $reserve + $data.reserve_delta;
-				$new_r = $new_reserve/10^$reserve_asset_decimals;
-				$data.new_s1 = ($new_r/$s2^$n)^(1/$m);
-				$data.tokens1_delta = floor($data.new_s1 * 10^$decimals1) - $supply1;
-				if ($data.tokens1_delta < 0)
-					bounce("partial tokens1_delta < 0");
-				$data.partial = true;
+				if ($data.reserve_delta <= 0) { // the reserve is too small even for partial fixing
+					$data.reserve_delta = 0;
+					$data.tokens1_delta = 0;
+					$data.new_s1 = $supply1/10^$decimals1;
+				}
+				else {
+					$new_reserve = $reserve + $data.reserve_delta;
+					$new_r = $new_reserve/10^$reserve_asset_decimals;
+					$data.new_s1 = ($new_r/$s2^$n)^(1/$m);
+					$data.tokens1_delta = floor($data.new_s1 * 10^$decimals1) - $supply1;
+					if ($data.tokens1_delta < 0)
+						bounce("partial tokens1_delta < 0: " || $data.tokens1_delta);
+					$data.partial = true;
+				}
 			}
 
 			// calc the reward
