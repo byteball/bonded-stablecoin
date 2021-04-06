@@ -9,7 +9,7 @@ const { Network } = Testkit({
 const network_fee = 4000
 
 function round(n, precision) {
-	return Math.round(n * 10 ** precision) / 10 ** precision;
+	return parseFloat(n.toFixed(precision));
 }
 
 describe('Governance proposal', function () {
@@ -18,13 +18,12 @@ describe('Governance proposal', function () {
 	before(async () => {
 		this.network = await Network.create()
 			.with.numberOfWitnesses(1)
-			.with.agent({ bank: path.join(__dirname, '../node_modules/bank-aa/bank.oscript') })
 			.with.agent({ bs: path.join(__dirname, '../decision-engine/bonded-stablecoin.oscript') })
 			.with.agent({ bsf: path.join(__dirname, '../decision-engine/bonded-stablecoin-factory.oscript') })
 			.with.agent({ fund: path.join(__dirname, '../decision-engine/stability-fund.oscript') })
 			.with.agent({ de: path.join(__dirname, '../decision-engine/decision-engine.oscript') })
 			.with.agent({ governance: path.join(__dirname, '../decision-engine/governance.oscript') })
-			.with.agent({ deposits: path.join(__dirname, '../deposits.oscript') })
+			.with.agent({ stable: path.join(__dirname, '../decision-engine/stable.oscript') })
 			.with.wallet({ oracle: 1e9 })
 			.with.wallet({ alice: 10000e9 })
 			.with.wallet({ bob: 1000e9 })
@@ -200,7 +199,7 @@ describe('Governance proposal', function () {
 
 	it('Alice buys shares, the DE buys tokens', async () => {
 		const amount = 3.5e9
-		const r = amount / 1e9
+		const r = (amount - 1000) / 1e9
 		const s2 = 2 * r / this.target_p2
 		const s1 = (r / s2 ** 2) ** 0.5
 		console.log({r, s1, s2})

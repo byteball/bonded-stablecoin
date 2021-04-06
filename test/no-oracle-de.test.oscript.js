@@ -12,7 +12,7 @@ const de_fee = 3000
 const de2fund_bytes = 2000
 
 function round(n, precision) {
-	return Math.round(n * 10 ** precision) / 10 ** precision;
+	return parseFloat(n.toFixed(precision));
 }
 
 describe('issue redeem', function () {
@@ -197,7 +197,7 @@ describe('issue redeem', function () {
 	it('Alice buys shares, the DE buys tokens', async () => {
 		const p2 = 1/50
 		const amount = 3.5e9
-		const r = amount / 1e9
+		const r = (amount - 1000) / 1e9
 		const s2 = 2 * r / p2
 		const s1 = (r / s2 ** 2) ** 0.5
 		console.log({r, s1, s2})

@@ -11,7 +11,7 @@ const aa2aa_fee = 2000
 const de_fee = 3000
 
 function round(n, precision) {
-	return Math.round(n * 10 ** precision) / 10 ** precision;
+	return parseFloat(n.toFixed(precision));
 }
 
 describe('Governance change decision engine', function () {
@@ -199,7 +199,7 @@ describe('Governance change decision engine', function () {
 
 	it('Alice buys shares, the DE buys tokens', async () => {
 		const amount = 3.5e9
-		const r = amount / 1e9
+		const r = (amount - 1000) / 1e9
 		const s2 = 2 * r / this.target_p2
 		const s1 = (r / s2 ** 2) ** 0.5
 		console.log({r, s1, s2})
@@ -590,7 +590,7 @@ describe('Governance change decision engine', function () {
 		])
 		const data = unitObj.messages.find(m => m.app === 'data').payload
 		data.tx.res.fee_percent = round(data.tx.res.fee_percent, 4)
-		data.tx.res.new_distance = round(data.tx.res.new_distance, 14)
+		data.tx.res.new_distance = round(data.tx.res.new_distance, 13)
 		data.tx.res.target_p2 = round(data.tx.res.target_p2, 14)
 		expect(data).to.be.deep.eq({
 			tx: {
@@ -602,9 +602,9 @@ describe('Governance change decision engine', function () {
 					regular_fee: fee,
 					reward: 0,
 					initial_p2,
-					p2: this.p2,
+					p2: round(this.p2, 16),
 					target_p2: round(this.target_p2, 14),
-					new_distance: round(this.distance, 14),
+					new_distance: round(this.distance, 13),
 					turnover: amount,
 					fee_percent,
 					slow_capacity_share: 0.5,

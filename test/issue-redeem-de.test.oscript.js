@@ -12,7 +12,7 @@ const de_fee = 3000
 const de2fund_bytes = 2000
 
 function round(n, precision) {
-	return Math.round(n * 10 ** precision) / 10 ** precision;
+	return parseFloat(n.toFixed(precision));
 }
 
 describe('issue redeem', function () {
@@ -218,7 +218,7 @@ describe('issue redeem', function () {
 
 	it('Alice buys shares, the DE buys tokens', async () => {
 		const amount = 3.5e9
-		const r = amount / 1e9
+		const r = (amount - 1000) / 1e9
 		const s2 = 2 * r / this.target_p2
 		const s1 = (r / s2 ** 2) ** 0.5
 		console.log({r, s1, s2})
@@ -320,7 +320,7 @@ describe('issue redeem', function () {
 		const tokens2 = 10e2
 		const { amount, fee, fee_percent } = this.buy(tokens1, tokens2)
 		console.log({ amount, fee, fee_percent })
-		const p2_1 = this.p2
+		const p2_1 = round(this.p2, 16)
 		const distance_1 = this.distance
 
 		const target_s1 = (this.target_p2 / 2 * (this.supply2 / 1e2) ** (1 - 2)) ** (1 / 2)
@@ -377,6 +377,7 @@ describe('issue redeem', function () {
 		])
 		const data = unitObj.messages.find(m => m.app === 'data').payload
 		data.tx.res.fee_percent = round(data.tx.res.fee_percent, 4)
+		data.tx.res.new_distance = round(data.tx.res.new_distance, 13)
 		expect(data).to.be.deep.eq({
 			tx: {
 				tokens2,
@@ -389,7 +390,7 @@ describe('issue redeem', function () {
 					initial_p2,
 					p2: p2_1,
 					target_p2: this.target_p2,
-					new_distance: round(distance_1, 15),
+					new_distance: round(distance_1, 13),
 					turnover: amount,
 					fee_percent,
 					slow_capacity_share: 0.5,
