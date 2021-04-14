@@ -177,7 +177,7 @@
 	init: `{
 		$fund_base_aa = '5WOTEURNL2XGGKD2FGM5HEES4NKVCBCR';
 		$decision_engine_base_aa = 'QXHLP4MLXSWHJGD3WUBFTXQSIA2R3QFG';
-		$governance_base_aa = 'GGKIBHUBLOKZ2HRAY7QYGAC7RNDPJL4B';
+		$governance_base_aa = 'JL6OOEOQCJ2RJ3NHCUJLUBDR3ZE3GY3F';
 
 		$aa2aa_bytes = 2000;
 		$de_bytes = 3000;

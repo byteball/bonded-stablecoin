@@ -1,7 +1,7 @@
 {
 	doc_url: "https://ostable.org/bonded-stablecoin-de-factory.json",
 	init: `{
-		$curve_base_aa = 'STA7KVV77IHZ3S34YAFZAIKUGPIK4EZ7';
+		$curve_base_aa = '3DGWRKKWWSC6SV4ZQDWEHYFRYB4TGPKX';
 		$stable_base_aa = 'YXPLX6Q3HBBSH2K5HLYM45W7P7HFSEIN';
 	}`,
 	messages: {
