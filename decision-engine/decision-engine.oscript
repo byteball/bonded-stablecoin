@@ -174,7 +174,7 @@
 						payload: {
 							asset: 'base',
 							outputs: [
-								{address: '{$fund_aa}', amount: "{trigger.output[[asset=base]] - 1000}"},
+								{address: '{$fund_aa}', amount: "{trigger.output[[asset=base]] - 2000}"},
 							]
 						}
 					},
@@ -302,7 +302,7 @@
 						$m = $curve_params.m;
 						$n = $curve_params.n;
 						$target_p2 = $get_target_p2() OTHERWISE trigger.data.p2;
-						// leave 1000 bytes unused to account for fee=1 that results from rounding errors, they'll be returned to us
+						// leave 1000 pennies unused to account for fee=1 that results from rounding errors, they'll be returned to us
 						$r = ($received_reserve_amount - $network_fee - 1000) / 10^$curve_params.reserve_asset_decimals;
 						$s2 = $n * $r / $target_p2;
 						$s1 = ($r / $s2^$n)^(1/$m);
@@ -328,7 +328,7 @@
 						payload: {
 							asset: 'base',
 							outputs: [
-								{address: "{$fund_aa}", amount: "{trigger.output[[asset=base]] - 1000}"}
+								{address: "{$fund_aa}", amount: "{trigger.output[[asset=base]] - 2000}"}
 							]
 						}
 					},
@@ -369,7 +369,7 @@
 						payload: {
 							asset: 'base',
 							outputs: [
-								{address: "{$fund_aa}", amount: "{trigger.output[[asset=base]] - 1000}"}
+								{address: "{$fund_aa}", amount: "{trigger.output[[asset=base]] - 2000}"}
 							]
 						}
 					},

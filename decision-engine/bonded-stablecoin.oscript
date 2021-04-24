@@ -176,7 +176,7 @@
 	}`,
 	init: `{
 		$fund_base_aa = '5WOTEURNL2XGGKD2FGM5HEES4NKVCBCR';
-		$decision_engine_base_aa = 'QXHLP4MLXSWHJGD3WUBFTXQSIA2R3QFG';
+		$decision_engine_base_aa = 'R3WZUWKTFISJ53MGAGSS5OIVMDAFC3WV';
 		$governance_base_aa = 'JL6OOEOQCJ2RJ3NHCUJLUBDR3ZE3GY3F';
 
 		$aa2aa_bytes = 2000;
@@ -524,7 +524,7 @@
 								{address: "{$reserve_to}", amount: "{ $payout }"},
 								{address: "{$tokens1_to}", amount: "{$aa2aa_bytes}", if: "{ $reserve_asset == 'base' AND $tokens1_to_aa}"},
 								{address: "{$tokens2_to}", amount: "{$aa2aa_bytes}", if: "{ $reserve_asset == 'base' AND $tokens2_to_aa}"},
-								{address: "{$decision_engine_aa}", amount: "{$de_bytes}", if: "{$bNotifyDE}"},
+								{address: "{$decision_engine_aa}", amount: "{$de_bytes}", if: "{ $reserve_asset == 'base' AND $bNotifyDE}"},
 							]
 						}
 					},
