@@ -10,12 +10,14 @@
 		$below_peg_threshold = params.below_peg_threshold OTHERWISE 0.001; // deviation less than 0.1% is ignored
 		$below_peg_timeout = exists(params.below_peg_timeout) ? params.below_peg_timeout : 12 * 3600;
 		$min_reserve_delta = params.min_reserve_delta OTHERWISE 1e5;
+		$max_reserve_share = params.max_reserve_share OTHERWISE 0.1;
 
 		$fund_aa = var[$curve_aa]['fund_aa'];
 
 		// tokens
 		$reserve_asset = $curve_params.reserve_asset OTHERWISE 'base';
 		$asset1 = var[$curve_aa]['asset1'];
+		$asset2 = var[$curve_aa]['asset2'];
 		$shares_asset = var[$fund_aa]['shares_asset'];
 
 		$fee = $reserve_asset == 'base' ? 1e4 : 0; // charged by us
@@ -92,6 +94,14 @@
 
 		$get_distance = ($p2, $target_p2) => (exists($p2) AND exists($target_p2)) ? abs($p2 - $target_p2) / min($p2, $target_p2) : 0;
 
+		$get_fee_multiplier = () => var[$curve_aa]['fee_multiplier'] OTHERWISE $curve_params.fee_multiplier OTHERWISE 5;
+
+		$get_fee = ($avg_reserve, $old_distance, $new_distance) => {
+			$fee_multiplier = $get_fee_multiplier();
+			$curve_fee = ceil($fee_multiplier * $avg_reserve * ($new_distance - $old_distance) * ($new_distance + $old_distance));
+			$curve_fee
+		};
+
 		$get_exchange_data = () => {
 			$supply1 = var[$curve_aa]['supply1'];
 			$supply2 = var[$curve_aa]['supply2'];
@@ -118,9 +128,9 @@
 			$data.new_s1 = ($supply1 + $data.tokens1_delta) / 10^$decimals1;
 			$data.reserve_delta = ceil($get_reserve($data.new_s1, $s2) * 10^$reserve_asset_decimals) - $reserve;
 
-			$reserve_balance = balance[$fund_aa][$reserve_asset];
-			if ($data.reserve_delta > $reserve_balance){ // partial fixing
-				$data.reserve_delta = $reserve_balance - $network_fee - ($reserve_asset == 'base' ? 3000 : 0);
+			$available_reserve_balance = floor($max_reserve_share * balance[$fund_aa][$reserve_asset]);
+			if ($data.reserve_delta > $available_reserve_balance){ // partial fixing
+				$data.reserve_delta = $available_reserve_balance - $network_fee - ($reserve_asset == 'base' ? 3000 : 0);
 				if ($data.reserve_delta <= 0) { // the reserve is too small even for partial fixing
 					$data.reserve_delta = 0;
 					$data.tokens1_delta = 0;
@@ -154,8 +164,17 @@
 			balance[$fund_aa][$reserve_asset] + $p1 * balance[$fund_aa][$asset1]
 		};
 
+		$get_net_proceeds = () => {
+			$res = trigger.data.tx.res;
+			// subtract de_bytes
+			$net_proceeds = trigger.output[[asset=$reserve_asset]] - ($reserve_asset == 'base' ? 3000 : 0);
+			if ($net_proceeds != -$res.reserve_needed - $network_fee)
+				bounce("received wrong amount " || $net_proceeds || ", expected " || (-$res.reserve_needed - $network_fee));
+			$net_proceeds
+		};
 
 		$redemption = var['redemption'];
+		$capacitor_sweeping = var['capacitor_sweeping'];
 
 		if (trigger.data.to AND !is_valid_address(trigger.data.to))
 			bounce("bad to address");
@@ -193,7 +212,7 @@
 
 			// fix the price
 			{
-				if: `{ (trigger.data.tx AND trigger.address == $curve_aa) OR trigger.data.act }`,
+				if: `{ (trigger.data.tx AND trigger.address == $curve_aa AND !$capacitor_sweeping) OR trigger.data.act }`,
 				init: `{
 					$below_peg_ts = var['below_peg_ts'];
 
@@ -203,13 +222,17 @@
 					if ($redemption){
 						if (trigger.address != $curve_aa)
 							bounce("BUG: redemption is still active");
-						$res = trigger.data.tx.res;
+						if (!trigger.data.to OR trigger.data.to != $fund_aa)
+							bounce("wrong to address: " || trigger.data.to);
+						if (trigger.data.tx.tokens2 != 0)
+							bounce("t2 transaction, expected t1");
+						$net_proceeds = $get_net_proceeds();
 						$request_data.payments[] = {
 							asset: $reserve_asset,
 							address: $redemption.address,
-							amount: $redemption.reserve_amount - $res.reserve_needed - $network_fee
+							amount: $redemption.reserve_amount + $net_proceeds
 						};
-						response['t1_redemption_proceeds'] = -$res.reserve_needed;
+						response['t1_redemption_proceeds'] = $net_proceeds;
 					}
 
 					$data = $get_exchange_data();
@@ -254,7 +277,17 @@
 							asset: `base`,
 							outputs: [
 								// to trigger the fund AA and make sure it has enough bytes to respond
-								{address: "{$fund_aa}", amount: 2000}
+								{address: "{$fund_aa}", amount: "{2000 + ($reserve_asset == 'base' ? $net_proceeds : 0)}"}
+							]
+						}
+					},
+					{ // forward the t1 redemption proceeds to the fund
+						if: `{$bSending AND $redemption AND $reserve_asset != 'base'}`,
+						app: 'payment',
+						payload: {
+							asset: `{$reserve_asset}`,
+							outputs: [
+								{address: "{$fund_aa}", amount: "{$net_proceeds}"}
 							]
 						}
 					},
@@ -263,7 +296,7 @@
 						state: `{
 							if ($large_below_peg AND !$below_peg_ts AND $below_peg_timeout)
 								var['below_peg_ts'] = timestamp;
-							if ((!$large_below_peg OR $bFixing AND !$large_below_peg_after) AND $below_peg_ts)
+							if ((!$large_below_peg OR $bFixing /*AND !$large_below_peg_after*/) AND $below_peg_ts)
 								var['below_peg_ts'] = false;
 							if ($redemption)
 								var['redemption'] = false;
@@ -276,6 +309,130 @@
 				]
 			},
 
+
+			// sweep the funds from the capacitor if the reward is larger than the fee
+			{
+				if: `{trigger.data.sweep_capacitor}`,
+				init: `{
+					$target_p2 = $get_target_p2();
+					if (!exists($target_p2))
+						bounce("no target p2");
+					$current_p2 = var[$curve_aa]['p2'];
+					if ($current_p2 >= $target_p2)
+						bounce("p2 must be lower than the target");
+					$supply1 = var[$curve_aa]['supply1'];
+					$supply2 = var[$curve_aa]['supply2'];
+					$reserve = var[$curve_aa]['reserve'];
+
+					$decimals1 = $curve_params.decimals1;
+					$decimals2 = $curve_params.decimals2;
+					$reserve_asset_decimals = $curve_params.reserve_asset_decimals;
+					
+					$m = $curve_params.m;
+					$n = $curve_params.n;
+
+					$s1 = $supply1/10^$decimals1;
+
+					$target_s2 = ($target_p2 / $n / $s1^$m)^(1/($n-1));
+					$mul2 = 10^$decimals2;
+					$tokens2 = floor($target_s2 * $mul2) - $supply2;
+					if ($tokens2 <= 0)
+						bounce("would buy " || $tokens2 || " T2");
+					response["will buy T2"] = $tokens2;
+					$rounded_target_s2 = ($supply2 + $tokens2)/$mul2;
+					
+					$new_reserve = ceil($get_reserve($s1, $rounded_target_s2) * 10^$reserve_asset_decimals);
+					$reserve_delta = $new_reserve - $reserve;
+					if ($reserve_delta <= $min_reserve_delta)
+						bounce("reserve delta too small " || $reserve_delta);
+					$avg_reserve = ($reserve + $new_reserve) / 2;
+
+					$distance = $get_distance($current_p2, $target_p2);
+					$redemption_fee = $get_fee($avg_reserve, 0, $distance);
+					$reward = var[$curve_aa]['fast_capacity'];
+					if ($reward <= $redemption_fee)
+						bounce("reward would not be greater than the fee");
+				}`,
+				messages: [
+					{
+						app: 'payment',
+						payload: {
+							asset: 'base',
+							outputs: [{address: '{$fund_aa}', amount: 2000}]
+						}
+					},
+					{
+						app: 'data',
+						payload: {
+							payments: [{asset: '{$reserve_asset}', address: '{$curve_aa}', amount: '{$reserve_delta}'}],
+							forwarded_data: {to: '{this_address}', tokens2: '{$tokens2}'}
+						}
+					},
+					{
+						app: 'state',
+						state: `{
+							var['capacitor_sweeping'] = {paid: $reserve_delta};
+							response['message'] = "Expecting to make a profit of " || ($reward - $redemption_fee);
+						}`
+					}
+				]
+			},
+
+
+			// sweeping capacitor step 2: send the asset2 back to the curve
+			{
+				if: `{trigger.output[[asset=$asset2]] AND trigger.address == $curve_aa}`,
+				messages: [
+					{
+						app: 'payment',
+						payload: {
+							asset: '{$asset2}',
+							outputs: [{address: '{$curve_aa}', amount: '{trigger.output[[asset=$asset2]]}'}]
+						}
+					},
+					{
+						app: 'state',
+						state: `{
+							if (!$capacitor_sweeping)
+								bounce("no capacitor sweeping var");
+							// save the amount of the returned reserve asset for future forwarding to the fund
+							$capacitor_sweeping.returned_reserve = trigger.output[[asset=$reserve_asset]];
+							var['capacitor_sweeping'] = $capacitor_sweeping;
+						}`
+					}
+				]
+			},
+
+
+			// sweeping capacitor step 3: forward the proceeds to the fund
+			{
+				if: `{ trigger.data.tx AND trigger.address == $curve_aa AND $capacitor_sweeping }`,
+				init: `{
+					if (trigger.data.tx.tokens2 >= 0)
+						bounce("expected t2<0, got " || trigger.data.tx.tokens2);
+					$net_proceeds = $get_net_proceeds();
+					$returned_reserve = $capacitor_sweeping.returned_reserve;
+					if ($capacitor_sweeping.paid >= $returned_reserve + $net_proceeds)
+						bounce("capacitor sweeping was not profitable");
+				}`,
+				messages: [
+					{ // forward the proceeds to the fund
+						app: 'payment',
+						payload: {
+							asset: `{$reserve_asset}`,
+							outputs: [
+								{address: "{$fund_aa}", amount: "{$net_proceeds + $returned_reserve}"}
+							]
+						}
+					},
+					{
+						app: 'state',
+						state: `{
+							var['capacitor_sweeping'] = false;
+						}`
+					}
+				]
+			},
 
 
 			// buy shares from the AA
@@ -351,6 +508,8 @@
 					$my_share = $received_shares_amount/$shares_supply;
 					$reserve_amount = floor($my_share * balance[$fund_aa][$reserve_asset]);
 					$t1_amount = floor($my_share * balance[$fund_aa][$asset1]);
+					if ($t1_amount == 0)
+						bounce("would redeem 0 t1");
 
 					$payments = [{asset: $asset1, address: $curve_aa, amount: $t1_amount}];
 				}`,
@@ -377,7 +536,7 @@
 						app: 'data',
 						payload: {
 							payments: `{$payments}`,
-							forwarded_data: {notifyDE: 1}, // we'll be called back from the curve AA
+							forwarded_data: {notifyDE: 1, reserve_to: "{this_address}"}, // we'll be called back from the curve AA
 						}
 					},
 					{

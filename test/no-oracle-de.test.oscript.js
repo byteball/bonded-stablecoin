@@ -482,7 +482,7 @@ describe('issue redeem', function () {
 			},
 			{
 				address: this.fund_aa,
-				amount: 9000,
+				amount: 1e4 - 2000,
 			},
 		])
 		const data = unitObj.messages.find(m => m.app === 'data').payload
@@ -490,7 +490,7 @@ describe('issue redeem', function () {
 			payments: [{
 				asset: this.asset1, address: this.curve_aa, amount: t1_amount
 			}],
-			forwarded_data: {notifyDE: 1}
+			forwarded_data: { notifyDE: 1, reserve_to: this.decision_engine_aa }
 		})
 
 		// fund to curve
@@ -504,14 +504,14 @@ describe('issue redeem', function () {
 			},
 		])
 		const data2 = unitObj2.messages.find(m => m.app === 'data').payload
-		expect(data2).to.be.deep.eq({notifyDE: 1})
+		expect(data2).to.be.deep.eq({ notifyDE: 1, reserve_to: this.decision_engine_aa })
 
-		// curve to fund and DE
+		// curve to DE
 		const { response: response3 } = await this.network.getAaResponseToUnit(response2.response_unit)
 		const { unitObj: unitObj3 } = await this.alice.getUnitInfo({ unit: response3.response_unit })
 		expect(Utils.getExternalPayments(unitObj3)).to.deep.equalInAnyOrder([
 			{
-				address: this.fund_aa,
+				address: this.decision_engine_aa,
 				amount: -amount - fee - network_fee,
 			},
 			{
@@ -523,6 +523,7 @@ describe('issue redeem', function () {
 		data3.tx.res.fee_percent = round(data3.tx.res.fee_percent, 4)
 		data3.tx.res.new_distance = round(data3.tx.res.new_distance, 13)
 		expect(data3).to.be.deep.eq({
+			to: this.fund_aa,
 			tx: {
 				tokens2: 0,
 				res: {
@@ -551,7 +552,7 @@ describe('issue redeem', function () {
 		expect(Utils.getExternalPayments(unitObj4)).to.deep.equalInAnyOrder([
 			{
 				address: this.fund_aa,
-				amount: de2fund_bytes,
+				amount: de2fund_bytes + (-amount) - fee - network_fee,
 			},
 		])
 		const data4 = unitObj4.messages.find(m => m.app === 'data').payload
@@ -667,7 +668,7 @@ describe('issue redeem', function () {
 		const bytes_balance = balances.base.total
 
 		// partial fixing as bob's contribution is not enough for full fixing
-		const reserve_delta = bytes_balance - network_fee - 3000
+		const reserve_delta = Math.floor(0.1 * bytes_balance) - network_fee - 3000
 		const new_r = (this.reserve + reserve_delta) / 1e9
 		const s2 = this.supply2 / 1e2
 		const new_s1 = (new_r / s2 ** 2) ** 0.5
@@ -699,7 +700,8 @@ describe('issue redeem', function () {
 		expect(response.response.responseVars.message).to.be.equal("DE partially fixed the peg")
 
 		const { vars: de_vars } = await this.alice.readAAStateVars(this.decision_engine_aa)
-		expect(de_vars['below_peg_ts']).to.be.eq(this.below_peg_ts) // not updated
+	//	expect(de_vars['below_peg_ts']).to.be.eq(this.below_peg_ts) // not updated
+		expect(de_vars['below_peg_ts']).to.be.undefined // new version
 
 		const { vars } = await this.alice.readAAStateVars(this.curve_aa)
 		console.log(vars)

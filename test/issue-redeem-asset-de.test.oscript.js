@@ -59,6 +59,7 @@ describe('issue redeem', function () {
 
 		const ts = Math.floor(Date.now() / 1000)
 		this.fee_multiplier = 5
+		this.sf_capacity_share = 0.3
 		const { unit, error } = await this.bob.triggerAaWithData({
 			toAddress: this.network.agent.bsf,
 			amount: 15000,
@@ -74,6 +75,7 @@ describe('issue redeem', function () {
 				allow_grants: true,
 				oracle1: this.oracleAddress,
 				feed_name1: 'GBYTE_USD',
+				sf_capacity_share: this.sf_capacity_share,
 			},
 		})
 		console.log(unit, error)
@@ -145,8 +147,6 @@ describe('issue redeem', function () {
 			const reward = old_distance ? Math.floor((1 - new_distance / old_distance) * this.fast_capacity) : 0;
 			const reward_percent = round(reward / abs_reserve_delta * 100, 4)
 
-			console.log('p2 =', p2, 'target p2 =', this.target_p2, 'amount =', amount, 'fee =', fee, 'reward =', reward, 'old distance =', old_distance, 'new distance =', new_distance, 'fast capacity =', this.fast_capacity)
-	
 			this.p2 = p2
 			this.distance = new_distance
 			if (fee > 0) {
@@ -156,6 +156,8 @@ describe('issue redeem', function () {
 			else if (reward > 0)
 				this.fast_capacity -= reward
 			
+			console.log('p2 =', p2, 'target p2 =', this.target_p2, 'amount =', amount, 'fee =', fee, 'reward =', reward, 'old distance =', old_distance, 'new distance =', new_distance, 'fast capacity =', this.fast_capacity)
+	
 			if (fee > 0 && reward > 0)
 				throw Error("both fee and reward are positive");
 			if (fee < 0 && reward < 0)
@@ -507,6 +509,256 @@ describe('issue redeem', function () {
 
 	})
 
+
+	it("Alice triggers the DE to sweep the capacitor, it is not profitable", async () => {
+
+		const { unit, error } = await this.alice.triggerAaWithData({
+			toAddress: this.decision_engine_aa,
+			amount: 1e4,
+			data: {
+				sweep_capacitor: 1,
+			},
+		})
+		expect(error).to.be.null
+		expect(unit).to.be.validUnit
+
+		const { response } = await this.network.getAaResponseToUnit(unit)
+	//	await this.network.witnessUntilStable(response.response_unit)
+
+		expect(response.response.error).to.be.eq("reward would not be greater than the fee")
+		expect(response.bounced).to.be.true
+		expect(response.response_unit).to.be.null
+	})
+
+	it('Post a new data feed that makes p2 only slightly lower than the target', async () => {
+		const price = 20.5
+		const { unit, error } = await this.oracle.sendMulti({
+			messages: [{
+				app: 'data_feed',
+				payload: {
+					GBYTE_USD: price + '',
+				}
+			}],
+		})
+
+		expect(error).to.be.null
+		expect(unit).to.be.validUnit
+
+		const { unitObj } = await this.oracle.getUnitInfo({ unit: unit })
+		const dfMessage = unitObj.messages.find(m => m.app === 'data_feed')
+		expect(dfMessage.payload.GBYTE_USD).to.be.equal(price + '')
+		await this.network.witnessUntilStable(unit)
+
+		this.target_p2 = 1/price
+	})
+
+
+	it("Alice triggers the DE to sweep the capacitor again, it is profitable now", async () => {
+
+		const old_supply1 = this.supply1
+		const old_supply2 = this.supply2
+		const old_reserve = this.reserve
+		const old_fund_balances = await this.bob.getOutputsBalanceOf(this.fund_aa);
+		const old_de_balances = await this.bob.getOutputsBalanceOf(this.decision_engine_aa);
+
+		// buy
+		const s1 = this.supply1/1e9
+		const target_s2 = this.target_p2 / 2 / s1 ** 2
+		const tokens2 = Math.floor(target_s2 * 1e2) - this.supply2
+		console.log('will buy', tokens2)
+		const { amount, fee: fee1, reward } = this.buy(0, tokens2)
+		expect(fee1).to.be.lte(0)
+		expect(reward).to.be.gt(0)
+
+		// sell
+		const { amount: amount2, fee, fee_percent } = this.buy(0, -tokens2)
+		expect(amount2).to.be.eq(-amount)
+		expect(this.supply1).to.be.eq(old_supply1)
+		expect(this.supply2).to.be.eq(old_supply2)
+		expect(this.reserve).to.be.eq(old_reserve)
+
+		const profit = reward - fee
+
+		const { unit, error } = await this.alice.triggerAaWithData({
+			toAddress: this.decision_engine_aa,
+			amount: 1e4,
+			data: {
+				sweep_capacitor: 1,
+			},
+		})
+		expect(error).to.be.null
+		expect(unit).to.be.validUnit
+
+		const { response } = await this.network.getAaResponseToUnit(unit)
+	//	await this.network.witnessUntilStable(response.response_unit)
+
+		expect(response.response.error).to.be.undefined
+		expect(response.bounced).to.be.false
+		expect(response.response_unit).to.be.validUnit
+		console.log(response.response.responseVars)
+		expect(response.response.responseVars['will buy T2']).to.be.equal(tokens2)
+	//	expect(response.response.responseVars.message).to.be.equal("Expecting to make a profit of " + profit)
+		const parsedProfit = response.response.responseVars.message.match(/^Expecting to make a profit of (\d+)$/)[1]
+		expect(profit/parsedProfit).to.be.closeTo(1, 0.01)
+
+		const { vars: de_vars } = await this.alice.readAAStateVars(this.decision_engine_aa)
+		expect(de_vars['capacitor_sweeping']).to.be.undefined
+		expect(de_vars['below_peg_ts']).to.be.eq(this.below_peg_ts)
+
+		const { vars } = await this.alice.readAAStateVars(this.curve_aa)
+		console.log(vars)
+		expect(vars['supply1']).to.be.equal(this.supply1)
+		expect(vars['supply2']).to.be.equal(this.supply2)
+		expect(vars['reserve']).to.be.equal(this.reserve)
+		expect(vars['slow_capacity']).to.be.equal(this.slow_capacity)
+		expect(vars['fast_capacity']).to.be.equal(this.fast_capacity)
+		expect(vars['lost_peg_ts']).to.be.undefined
+
+		const fund_balances = await this.bob.getOutputsBalanceOf(this.fund_aa);
+		const de_balances = await this.bob.getOutputsBalanceOf(this.decision_engine_aa);
+		expect(de_balances[this.asset1]).to.be.undefined
+		expect(de_balances[this.asset2]).to.be.undefined
+		expect(de_balances[this.reserve_asset]).to.be.undefined
+		expect(fund_balances[this.asset1].total).to.be.eq(old_fund_balances[this.asset1].total)
+		expect(fund_balances[this.asset2].total).to.be.eq(old_fund_balances[this.asset2].total)
+		expect(fund_balances[this.reserve_asset].total).to.be.eq(old_fund_balances[this.reserve_asset].total + profit)
+
+
+		// DE to fund
+		const { unitObj } = await this.alice.getUnitInfo({ unit: response.response_unit })
+		expect(Utils.getExternalPayments(unitObj)).to.deep.equalInAnyOrder([
+			{
+				address: this.fund_aa,
+				amount: de2fund_bytes,
+			},
+		])
+		const data = unitObj.messages.find(m => m.app === 'data').payload
+		expect(data).to.be.deep.equalInAnyOrder({
+			payments: [{
+				asset: this.reserve_asset, address: this.curve_aa, amount: amount
+			}],
+			forwarded_data: { to: this.decision_engine_aa, tokens2: tokens2 }
+		})
+
+
+		// fund to curve
+		const { response: response2 } = await this.network.getAaResponseToUnit(response.response_unit)
+		expect(response2.response_unit).to.be.validUnit
+		const { unitObj: unitObj2 } = await this.alice.getUnitInfo({ unit: response2.response_unit })
+		expect(Utils.getExternalPayments(unitObj2)).to.deep.equalInAnyOrder([
+			{
+				asset: this.reserve_asset,
+				address: this.curve_aa,
+				amount: amount,
+			},
+		])
+		const data2 = unitObj2.messages.find(m => m.app === 'data').payload
+		expect(data2).to.be.deep.eq({ to: this.decision_engine_aa, tokens2: tokens2 })
+
+
+		// curve to DE
+		const { response: response3 } = await this.network.getAaResponseToUnit(response2.response_unit)
+		expect(response3.response_unit).to.be.validUnit
+		const { unitObj: unitObj3 } = await this.alice.getUnitInfo({ unit: response3.response_unit })
+		expect(Utils.getExternalPayments(unitObj3)).to.deep.equalInAnyOrder([
+			{
+				asset: this.asset2,
+				address: this.decision_engine_aa,
+				amount: tokens2,
+			},
+			{
+				asset: this.reserve_asset,
+				address: this.decision_engine_aa,
+				amount: reward,
+			},
+			{
+				address: this.decision_engine_aa,
+				amount: 2000,
+			},
+			{
+				address: this.decision_engine_aa,
+				amount: 2000,
+			},
+		])
+		const data3 = unitObj3.messages.find(m => m.app === 'data').payload
+		expect(data3).to.be.deep.eq({ to: this.fund_aa })
+
+
+		// DE to curve
+		const { response: response4 } = await this.network.getAaResponseToUnit(response3.response_unit)
+		expect(response4.response_unit).to.be.validUnit
+		const { unitObj: unitObj4 } = await this.alice.getUnitInfo({ unit: response4.response_unit })
+		expect(Utils.getExternalPayments(unitObj4)).to.deep.equalInAnyOrder([
+			{
+				asset: this.asset2,
+				address: this.curve_aa,
+				amount: tokens2,
+			},
+		])
+		const data_payload4 = unitObj4.messages.find(m => m.app === 'data')
+		expect(data_payload4).to.be.undefined
+
+
+		// curve to DE
+		const { response: response5 } = await this.network.getAaResponseToUnit(response4.response_unit)
+		expect(response5.response_unit).to.be.validUnit
+		const { unitObj: unitObj5 } = await this.alice.getUnitInfo({ unit: response5.response_unit })
+		expect(Utils.getExternalPayments(unitObj5)).to.deep.equalInAnyOrder([
+			{
+				asset: this.reserve_asset,
+				address: this.decision_engine_aa,
+				amount: amount - fee,
+			},
+			{
+				address: this.decision_engine_aa,
+				amount: de_fee,
+			},
+		])
+		const data5 = unitObj5.messages.find(m => m.app === 'data').payload
+		expect(data5.tx.tokens2).to.be.eq(-tokens2)
+		expect(data5.tx.res.reserve_needed).to.be.eq(-amount + fee)
+
+
+		// DE to fund
+		const { response: response6 } = await this.network.getAaResponseToUnit(response5.response_unit)
+		expect(response6.response_unit).to.be.validUnit
+		const { unitObj: unitObj6 } = await this.alice.getUnitInfo({ unit: response6.response_unit })
+		expect(Utils.getExternalPayments(unitObj6)).to.deep.equalInAnyOrder([
+			{
+				asset: this.reserve_asset,
+				address: this.fund_aa,
+				amount: amount + reward - fee,
+			},
+		])
+		const data_payload6 = unitObj6.messages.find(m => m.app === 'data')
+		expect(data_payload6).to.be.undefined
+
+
+	})
+
+	it('Post a new data feed with the old price', async () => {
+		const price = 20
+		const { unit, error } = await this.oracle.sendMulti({
+			messages: [{
+				app: 'data_feed',
+				payload: {
+					GBYTE_USD: price,
+				}
+			}],
+		})
+
+		expect(error).to.be.null
+		expect(unit).to.be.validUnit
+
+		const { unitObj } = await this.oracle.getUnitInfo({ unit: unit })
+		const dfMessage = unitObj.messages.find(m => m.app === 'data_feed')
+		expect(dfMessage.payload.GBYTE_USD).to.be.equal(price)
+		await this.network.witnessUntilStable(unit)
+
+		this.target_p2 = 1/price
+	})
+
+
 	it("Alice buys back part of tokens2, the price is still under the peg and the DE does not interfere", async () => {
 		const { time_error } = await this.network.timetravel({shift: '1h'})
 		expect(time_error).to.be.undefined
@@ -546,7 +798,6 @@ describe('issue redeem', function () {
 		expect(vars['reserve']).to.be.equal(this.reserve)
 		expect(vars['slow_capacity']).to.be.equal(this.slow_capacity)
 		expect(vars['fast_capacity']).to.be.equal(this.fast_capacity)
-		expect(vars['lost_peg_ts']).to.be.equal(this.lost_peg_ts)
 
 		const { vars: de_vars } = await this.alice.readAAStateVars(this.decision_engine_aa)
 		expect(de_vars['below_peg_ts']).to.be.eq(this.below_peg_ts)
@@ -564,12 +815,79 @@ describe('issue redeem', function () {
 				amount: de_fee,
 			},
 		])
+		expect(vars['lost_peg_ts']).to.be.equal(unitObj.timestamp)
+		this.lost_peg_ts = vars['lost_peg_ts']
 
 		const { response: response2 } = await this.network.getAaResponseToUnit(response.response_unit)
 		expect(response2.response_unit).to.be.null
 		expect(response2.response.responseVars.message).to.be.equal("DE does not interfere yet")
 	})
 
+
+	it("Bob buys shares in the fund", async () => {
+		const balances = await this.bob.getOutputsBalanceOf(this.fund_aa);
+		expect(balances[this.asset1].total).to.be.eq(this.supply1)
+		const reserve_balance = balances[this.reserve_asset].total
+		const p1 = this.getP1(this.supply1, this.supply2)
+		const share_price_in_full_units = (reserve_balance / 1e9 + p1 * this.supply1 / 1e9) / this.shares_supply
+		const share_price_in_pennies = share_price_in_full_units * 1e9
+
+		const amount = 1e9
+		const shares = Math.floor(amount / share_price_in_pennies)
+		
+		const { unit, error } = await this.bob.sendMulti({
+			asset: this.reserve_asset,
+			base_outputs: [{ address: this.decision_engine_aa, amount: 1e4 }],
+			asset_outputs: [{ address: this.decision_engine_aa, amount: amount }],
+		})
+		expect(error).to.be.null
+		expect(unit).to.be.validUnit
+
+		const { response } = await this.network.getAaResponseToUnit(unit)
+		await this.network.witnessUntilStable(response.response_unit)
+
+		expect(response.response.error).to.be.undefined
+		expect(response.bounced).to.be.false
+		expect(response.response_unit).to.be.validUnit
+
+		// DE to fund
+		const { unitObj } = await this.bob.getUnitInfo({ unit: response.response_unit })
+		expect(Utils.getExternalPayments(unitObj)).to.deep.equalInAnyOrder([
+			{
+				asset: this.reserve_asset,
+				address: this.fund_aa,
+				amount: amount,
+			},
+			{
+				address: this.fund_aa,
+				amount: 8000,
+			},
+		])
+		const data = unitObj.messages.find(m => m.app === 'data').payload
+		expect(data).to.be.deep.equalInAnyOrder({
+			payments: [{
+				asset: this.shares_asset, address: this.bobAddress, amount: shares
+			}],
+		})
+
+		// fund to bob
+		const { response: response2 } = await this.network.getAaResponseToUnit(response.response_unit)
+		const { unitObj: unitObj2 } = await this.bob.getUnitInfo({ unit: response2.response_unit })
+		expect(Utils.getExternalPayments(unitObj2)).to.deep.equalInAnyOrder([
+			{
+				asset: this.shares_asset,
+				address: this.bobAddress,
+				amount: shares,
+			},
+		])
+		expect(unitObj2.messages.find(m => m.app === 'data')).to.be.undefined
+
+		this.shares_supply += shares
+		const { vars: fund_vars } = await this.bob.readAAStateVars(this.fund_aa)
+		expect(fund_vars['shares_supply']).to.be.eq(this.shares_supply)
+
+	})
+	
 
 	it("Alice waits and triggers the DE to act", async () => {
 		const { time_error } = await this.network.timetravel({shift: '11h'})
@@ -672,70 +990,6 @@ describe('issue redeem', function () {
 		expect(response4.response_unit).to.be.null
 	})
 
-
-	it("Bob buys shares in the fund", async () => {
-		const balances = await this.bob.getOutputsBalanceOf(this.fund_aa);
-		expect(balances[this.asset1].total).to.be.eq(this.supply1)
-		const reserve_balance = balances[this.reserve_asset].total
-		const p1 = this.getP1(this.supply1, this.supply2)
-		const share_price_in_full_units = (reserve_balance / 1e9 + p1 * this.supply1 / 1e9) / this.shares_supply
-		const share_price_in_pennies = share_price_in_full_units * 1e9
-
-		const amount = 1e9
-		const shares = Math.floor(amount / share_price_in_pennies)
-		
-		const { unit, error } = await this.bob.sendMulti({
-			asset: this.reserve_asset,
-			base_outputs: [{ address: this.decision_engine_aa, amount: 1e4 }],
-			asset_outputs: [{ address: this.decision_engine_aa, amount: amount }],
-		})
-		expect(error).to.be.null
-		expect(unit).to.be.validUnit
-
-		const { response } = await this.network.getAaResponseToUnit(unit)
-		await this.network.witnessUntilStable(response.response_unit)
-
-		expect(response.response.error).to.be.undefined
-		expect(response.bounced).to.be.false
-		expect(response.response_unit).to.be.validUnit
-
-		// DE to fund
-		const { unitObj } = await this.bob.getUnitInfo({ unit: response.response_unit })
-		expect(Utils.getExternalPayments(unitObj)).to.deep.equalInAnyOrder([
-			{
-				asset: this.reserve_asset,
-				address: this.fund_aa,
-				amount: amount,
-			},
-			{
-				address: this.fund_aa,
-				amount: 8000,
-			},
-		])
-		const data = unitObj.messages.find(m => m.app === 'data').payload
-		expect(data).to.be.deep.equalInAnyOrder({
-			payments: [{
-				asset: this.shares_asset, address: this.bobAddress, amount: shares
-			}],
-		})
-
-		// fund to bob
-		const { response: response2 } = await this.network.getAaResponseToUnit(response.response_unit)
-		const { unitObj: unitObj2 } = await this.bob.getUnitInfo({ unit: response2.response_unit })
-		expect(Utils.getExternalPayments(unitObj2)).to.deep.equalInAnyOrder([
-			{
-				asset: this.shares_asset,
-				address: this.bobAddress,
-				amount: shares,
-			},
-		])
-		expect(unitObj2.messages.find(m => m.app === 'data')).to.be.undefined
-
-		this.shares_supply += shares
-		const { vars: fund_vars } = await this.bob.readAAStateVars(this.fund_aa)
-		expect(fund_vars['shares_supply']).to.be.eq(this.shares_supply)
-
-	})
 
 	it('Post a new data feed with lower p2', async () => {
 		const price = 22
@@ -1042,7 +1296,7 @@ describe('issue redeem', function () {
 					amount: fund2curve_bytes,
 				}*/
 			],
-			forwarded_data: {notifyDE: 1}
+			forwarded_data: { notifyDE: 1, reserve_to: this.decision_engine_aa }
 		})
 
 		// fund to curve
@@ -1060,16 +1314,20 @@ describe('issue redeem', function () {
 			}*/
 		])
 		const data2 = unitObj2.messages.find(m => m.app === 'data').payload
-		expect(data2).to.be.deep.eq({notifyDE: 1})
+		expect(data2).to.be.deep.eq({ notifyDE: 1, reserve_to: this.decision_engine_aa })
 
-		// curve to fund and DE
+		// curve to DE
 		const { response: response3 } = await this.network.getAaResponseToUnit(response2.response_unit)
 		const { unitObj: unitObj3 } = await this.alice.getUnitInfo({ unit: response3.response_unit })
 		expect(Utils.getExternalPayments(unitObj3)).to.deep.equalInAnyOrder([
 			{
 				asset: this.reserve_asset,
-				address: this.fund_aa,
+				address: this.decision_engine_aa,
 				amount: -amount - fee,
+			},
+			{
+				address: this.decision_engine_aa,
+				amount: 2000, // aa2aa_bytes
 			},
 			{
 				address: this.decision_engine_aa,
@@ -1080,6 +1338,7 @@ describe('issue redeem', function () {
 		data3.tx.res.fee_percent = round(data3.tx.res.fee_percent, 4)
 		data3.tx.res.new_distance = round(data3.tx.res.new_distance, 12)
 		expect(data3).to.be.deep.eq({
+			to: this.fund_aa,
 			tx: {
 				tokens2: 0,
 				res: {
@@ -1109,6 +1368,11 @@ describe('issue redeem', function () {
 			{
 				address: this.fund_aa,
 				amount: de2fund_bytes,
+			},
+			{
+				asset: this.reserve_asset,
+				address: this.fund_aa,
+				amount: -amount - fee,
 			},
 		])
 		const data4 = unitObj4.messages.find(m => m.app === 'data').payload
@@ -1140,6 +1404,55 @@ describe('issue redeem', function () {
 
 	})
 
+
+	it('Move funds between slow and fast capacitor', async () => {
+		const { time_error } = await this.network.timetravel({shift: '3h'})
+		expect(time_error).to.be.undefined
+
+		const amount_moved = Math.floor(0.1 * this.slow_capacity)
+		const sf_amount = Math.floor(this.sf_capacity_share * amount_moved)
+		const fast_amount = amount_moved - sf_amount
+		this.slow_capacity -= amount_moved
+		this.fast_capacity += fast_amount
+
+		const { unit, error } = await this.alice.triggerAaWithData({
+			toAddress: this.curve_aa,
+			amount: 1e4,
+			data: {
+				move_capacity: 1,
+			},
+		})
+
+		expect(error).to.be.null
+		expect(unit).to.be.validUnit
+
+		const { unitObj } = await this.alice.getUnitInfo({ unit: unit })
+
+		const { response } = await this.network.getAaResponseToUnit(unit)
+	//	await this.network.witnessUntilStable(response.response_unit)
+
+		expect(response.response.error).to.be.undefined
+		expect(response.bounced).to.be.false
+		expect(response.response_unit).to.be.validUnit
+
+		const { vars } = await this.alice.readAAStateVars(this.curve_aa)
+		console.log(vars)
+		expect(vars['supply1']).to.be.equal(this.supply1)
+		expect(vars['supply2']).to.be.equal(this.supply2)
+		expect(vars['reserve']).to.be.equal(this.reserve)
+		expect(vars['slow_capacity']).to.be.equal(this.slow_capacity)
+		expect(vars['fast_capacity']).to.be.equal(this.fast_capacity)
+		expect(vars['lost_peg_ts']).to.be.equal(unitObj.timestamp)
+
+		const { unitObj: respUnit } = await this.alice.getUnitInfo({ unit: response.response_unit })
+		expect(Utils.getExternalPayments(respUnit)).to.deep.equalInAnyOrder([
+			{
+				asset: this.reserve_asset,
+				address: this.fund_aa,
+				amount: sf_amount,
+			},
+		])
+	})
 
 
 

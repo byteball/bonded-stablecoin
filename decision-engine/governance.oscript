@@ -16,7 +16,7 @@
 		$fund_aa = var[$curve_aa]['fund_aa'];
 		$asset = var[$fund_aa]['shares_asset'];
 		
-		$names = ['fee_multiplier', 'moved_capacity_share', 'threshold_distance', 'move_capacity_timeout', 'slow_capacity_share', 'interest_rate', 'oracles', 'proposal', 'deposits.min_deposit_term', 'deposits.challenging_period', 'deposits.challenge_immunity_period', 'deposits.reporter_share', 'decision_engine_aa'];
+		$names = ['fee_multiplier', 'moved_capacity_share', 'threshold_distance', 'move_capacity_timeout', 'slow_capacity_share', 'sf_capacity_share', 'interest_rate', 'oracles', 'proposal', 'deposits.min_deposit_term', 'deposits.challenging_period', 'deposits.challenge_immunity_period', 'deposits.reporter_share', 'decision_engine_aa'];
 		
 		$is_allowed_name = $name => {
 			length(filter($names, 20, $n => $n == $name)) == 1
@@ -142,6 +142,8 @@
 							bounce("invalid value");
 						if ($name == 'slow_capacity_share' AND !(typeof($value) == 'number' AND $value >= 0 AND $value <= 1))
 							bounce("invalid value");
+						if ($name == 'sf_capacity_share' AND !(typeof($value) == 'number' AND $value >= 0 AND $value <= 1))
+							bounce("invalid value");
 						if ($name == 'interest_rate' AND !(typeof($value) == 'number' AND $value >= 0))
 							bounce("invalid value");
 						if ($name == 'oracles')
@@ -208,7 +210,7 @@
 					$amount = trigger.data.amount OTHERWISE $balance;
 					if ($amount > $balance)
 						bounce("your balance is only " || $balance);
-					foreach($names, 13, $name => {
+					foreach($names, 14, $name => {
 						if (var['choice_' || trigger.address || '_' || $name])
 							bounce("support for " || $name || " not removed yet");
 					});

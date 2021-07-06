@@ -44,6 +44,19 @@
 			exists($interest_rate_var) ? $interest_rate_var : $get_initial_interest_rate()
 		};
 
+		// how much is moved each time
+		$get_moved_capacity_share = () => var['moved_capacity_share'] OTHERWISE params.moved_capacity_share OTHERWISE 0.1;
+
+		// timeout between movements of capacity from slow to fast pool
+		$get_move_capacity_timeout = () => var['move_capacity_timeout'] OTHERWISE params.move_capacity_timeout OTHERWISE 2*3600;
+
+		// what part of slow capacity is moved to SF
+		$get_sf_capacity_share = () => {
+			$sf_capacity_share_var = var['sf_capacity_share'];
+			exists($sf_capacity_share_var) ? $sf_capacity_share_var : (params.sf_capacity_share OTHERWISE 0)
+		};
+
+
 		$get_slow_capacity_share = () => {
 			$slow_capacity_share_var = var['slow_capacity_share'];
 			if (exists($slow_capacity_share_var))
@@ -152,7 +165,14 @@
 			}
 			else { // going towards the target price - get a reward
 				$fee = 0;
-				$reward = floor((1 - $new_distance/$distance) * $fast_capacity);
+				$regular_reward = floor((1 - $new_distance/$distance) * $fast_capacity);
+				if (params.capped_reward){
+					// if the reward would be greater than the fee for the reverse transaction, cap the reward by the fee
+					$reverse_fee = $get_fee($avg_reserve, $new_distance, $distance);
+					$reward = min($regular_reward, $reverse_fee);
+				}
+				else
+					$reward = $regular_reward;
 				$reserve_needed = $reserve_delta - $reward; // negative for payouts
 			}
 			$turnover = $get_turnover(-$reserve_delta, $tokens1, $tokens2, $p2);
@@ -176,8 +196,8 @@
 	}`,
 	init: `{
 		$fund_base_aa = '5WOTEURNL2XGGKD2FGM5HEES4NKVCBCR';
-		$decision_engine_base_aa = 'R3WZUWKTFISJ53MGAGSS5OIVMDAFC3WV';
-		$governance_base_aa = 'JL6OOEOQCJ2RJ3NHCUJLUBDR3ZE3GY3F';
+		$decision_engine_base_aa = params.decision_engine_base_aa OTHERWISE '625UKTER5WR5JQPQYS7CU4ST2EXFUCDG';
+		$governance_base_aa = 'LXHUYEV6IHBCTGMFNSWRBBU7DGR3JTIY';
 
 		$aa2aa_bytes = 2000;
 		$de_bytes = 3000;
@@ -190,9 +210,7 @@
 			bounce("curve not defined");
 
 		// fee and capacitor
-		$moved_capacity_share = var['moved_capacity_share'] OTHERWISE params.moved_capacity_share OTHERWISE 0.1; // how much is moved each time
 		$threshold_distance = var['threshold_distance'] OTHERWISE params.threshold_distance OTHERWISE 0.01; // 1% deviation from the peg
-		$move_capacity_timeout = var['move_capacity_timeout'] OTHERWISE params.move_capacity_timeout OTHERWISE 2*3600;
 
 		// reserve
 		$reserve_asset = params.reserve_asset OTHERWISE 'base';
@@ -214,6 +232,7 @@
 			$lost_peg_ts = var['lost_peg_ts'];
 
 		$governance_aa = var['governance_aa'];
+		$fund_aa = var['fund_aa'];
 	}`,
 	messages: {
 		cases: [
@@ -353,26 +372,40 @@
 
 			{ // move the capacity from slow to fast pool
 				if: `{ $ready AND trigger.data.move_capacity }`,
+				init: `{
+					$initial_p2 = var['p2'];
+					$target_p2 = $get_target_p2();
+					$distance = $get_distance($initial_p2, $target_p2);
+					if ($lost_peg_ts){
+						if ($distance > $threshold_distance AND timestamp > $lost_peg_ts + $get_move_capacity_timeout()){
+							$moved_amount = floor($get_moved_capacity_share() * var['slow_capacity']);
+							$sf_amount = floor($get_sf_capacity_share() * $moved_amount);
+							$fast_amount = $moved_amount - $sf_amount;
+							$bLostNow = true; // restart the countdown to the next movement
+							response['amount'] = $moved_amount;
+						}
+						else if ($distance <= $threshold_distance)
+							$bRestored = true;
+					}
+					else if ($distance > $threshold_distance)
+						$bLostNow = true;
+				}`,
 				messages: [
+					{
+						if: '{$sf_amount}',
+						app: 'payment',
+						payload: {
+							asset: '{$reserve_asset}',
+							outputs: [{address: '{$fund_aa}', amount: '{$sf_amount}'}]
+						}
+					},
 					{
 						app: 'state',
 						state: `{
-							$initial_p2 = var['p2'];
-							$target_p2 = $get_target_p2();
-							$distance = $get_distance($initial_p2, $target_p2);
-							if ($lost_peg_ts){
-								if ($distance > $threshold_distance AND timestamp > $lost_peg_ts + $move_capacity_timeout){
-									$amount = floor($moved_capacity_share * var['slow_capacity']);
-									var['slow_capacity'] -= $amount;
-									var['fast_capacity'] += $amount;
-									$bLostNow = true; // restart the countdown to the next movement
-									response['amount'] = $amount;
-								}
-								else if ($distance <= $threshold_distance)
-									$bRestored = true;
-							}
-							else if ($distance > $threshold_distance)
-								$bLostNow = true;
+							if ($moved_amount)
+								var['slow_capacity'] -= $moved_amount;
+							if ($fast_amount)
+								var['fast_capacity'] += $fast_amount;
 							if ($bRestored OR $bLostNow)
 								var['lost_peg_ts'] = $bLostNow ? timestamp : false;
 						}`
@@ -435,7 +468,7 @@
 					$tokens1 = trigger.data.tokens1 OTHERWISE -trigger.output[[asset=$asset1]];
 					$tokens2 = trigger.data.tokens2 OTHERWISE -trigger.output[[asset=$asset2]];
 
-					$bFund = (trigger.address == var['fund_aa']);
+					$bFund = (trigger.address == $fund_aa);
 					$bNotifyDE = (!$bFund OR trigger.data.notifyDE);
 					if ($tokens1 AND !$bFund)
 						bounce("only stability fund is allowed to transact in T1");

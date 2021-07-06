@@ -1,7 +1,7 @@
 {
 	doc_url: "https://ostable.org/bonded-stablecoin-de-factory.json",
 	init: `{
-		$curve_base_aa = 'CD5DNSVS6ENG5UYILRPJPHAB3YXKA63W';
+		$curve_base_aa = 'GWQVOQDPT4L5XPMDIQF5MNDQZNV5VGLY';
 		$stable_base_aa = 'YXPLX6Q3HBBSH2K5HLYM45W7P7HFSEIN';
 	}`,
 	messages: {
@@ -119,7 +119,7 @@
 						bounce("bad fee_multiplier");
 					
 					$moved_capacity_share = trigger.data.moved_capacity_share OTHERWISE 0.1;
-					if (typeof($moved_capacity_share) != 'number' OR $moved_capacity_share <= 0)
+					if (typeof($moved_capacity_share) != 'number' OR $moved_capacity_share <= 0 OR $moved_capacity_share > 1)
 						bounce("bad moved_capacity_share");
 					
 					$threshold_distance = trigger.data.threshold_distance OTHERWISE 0.01;
@@ -131,7 +131,7 @@
 						bounce("bad move_capacity_timeout");
 					
 					$slow_capacity_share = trigger.data.slow_capacity_share; // use AA default if missing
-					if (exists($slow_capacity_share) AND (typeof($slow_capacity_share) != 'number' OR $slow_capacity_share < 0))
+					if (exists($slow_capacity_share) AND (typeof($slow_capacity_share) != 'number' OR $slow_capacity_share < 0 OR $slow_capacity_share > 1))
 						bounce("bad slow_capacity_share");
 					
 					$params = {
@@ -151,6 +151,21 @@
 						move_capacity_timeout: $move_capacity_timeout,
 						slow_capacity_share: $slow_capacity_share,
 					};
+
+					if (trigger.data.decision_engine_base_aa){
+						if (!is_valid_address(trigger.data.decision_engine_base_aa))
+							bounce("bad decision_engine_base_aa address");
+						$params.decision_engine_base_aa = trigger.data.decision_engine_base_aa;
+					}
+
+					if (exists(trigger.data.sf_capacity_share)){
+						if (typeof(trigger.data.sf_capacity_share) != 'number' OR trigger.data.sf_capacity_share < 0 OR trigger.data.sf_capacity_share > 1)
+							bounce("bad sf_capacity_share");
+						$params.sf_capacity_share = trigger.data.sf_capacity_share;
+					}
+
+					if (trigger.data.capped_reward)
+						$params.capped_reward = 1;
 					
 					foreach(['oracle1', 'oracle2', 'oracle3'], 3, $p => {
 						$oracle = trigger.data[$p];
