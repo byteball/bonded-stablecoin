@@ -24,6 +24,5 @@
 		"mocha": "^6.2.0"
 	},
 	"resolutions": {
-		"level-rocksdb": "^4.0.0"
 	}
 }
